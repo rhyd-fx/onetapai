@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+qdrant-client
+fastembed          # local CPU embeddings (replaces OpenAI embeddings)
+openai             # used as the OpenAI-compatible client for OpenRouter
+aiohttp
+scipy
+scikit-learn
+numpy
+pymysql
+sqlalchemy
+redis
+celery
+boto3              # S3/MinIO client for raw match archival

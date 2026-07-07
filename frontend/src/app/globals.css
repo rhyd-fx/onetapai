@@ -1,0 +1,114 @@
+@import 'tailwindcss';
+
+/* ── Design tokens (Tailwind v4 @theme → generates utilities) ───────────── */
+@theme {
+  --color-ink-900: #05070b;      /* deepest background */
+  --color-ink-800: #0a0e14;      /* app background */
+  --color-ink-700: #0f1720;      /* panel base */
+  --color-ink-600: #151d28;      /* raised panel */
+  --color-line: #1e2a38;         /* borders */
+
+  --color-brand-red: #ff4655;    /* Valorant neon red */
+  --color-brand-red-soft: #ff6b78;
+  --color-brand-blue: #22d3ee;   /* electric blue */
+  --color-brand-blue-soft: #67e8f9;
+
+  --color-muted: #8b9bb0;        /* secondary text */
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+:root {
+  /* Legacy vars kept so the landing page / older components still render. */
+  --bg-primary: #0a0e14;
+  --bg-secondary: #0f1720;
+  --accent-red: #ff4655;
+  --accent-red-hover: #ff6b78;
+  --text-primary: #ece8e1;
+  --text-secondary: #8b9bb0;
+  --glass-bg: rgba(15, 23, 32, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.08);
+}
+
+html,
+body {
+  background-color: var(--color-ink-800);
+  color: #e6edf5;
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+/* Subtle app-wide radial glow backdrop. */
+body {
+  background-image:
+    radial-gradient(60rem 60rem at 15% -10%, rgba(255, 70, 85, 0.10), transparent 60%),
+    radial-gradient(50rem 50rem at 110% 10%, rgba(34, 211, 238, 0.08), transparent 55%);
+  background-attachment: fixed;
+}
+
+a { color: inherit; text-decoration: none; }
+
+/* ── Reusable component utilities ───────────────────────────────────────── */
+@utility glass {
+  background: color-mix(in srgb, var(--color-ink-700) 72%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid color-mix(in srgb, #ffffff 8%, transparent);
+}
+
+@utility glow-red {
+  box-shadow: 0 0 0 1px rgba(255, 70, 85, 0.25), 0 8px 40px -12px rgba(255, 70, 85, 0.45);
+}
+
+@utility glow-blue {
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.22), 0 8px 40px -12px rgba(34, 211, 238, 0.4);
+}
+
+/* Legacy classes still referenced by the landing page. */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+}
+.btn-primary {
+  background-color: var(--accent-red);
+  color: #fff;
+  border: none;
+  padding: 12px 24px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.btn-primary:hover {
+  background-color: var(--accent-red-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 18px rgba(255, 70, 85, 0.4);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in { animation: fadeIn 0.7s ease-out forwards; }
+
+/* Skeleton shimmer for "Data Incoming" locked telemetry. */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.03) 25%,
+    rgba(255, 255, 255, 0.09) 37%,
+    rgba(255, 255, 255, 0.03) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
