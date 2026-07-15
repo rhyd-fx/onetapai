@@ -18,11 +18,13 @@ CREATE TABLE players (
     game_name       VARCHAR(16)     NOT NULL,
     tag_line        VARCHAR(5)      NOT NULL,
     region          VARCHAR(10)     NOT NULL DEFAULT 'na',
+    card_uuid       VARCHAR(36)     NULL,
     first_seen      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_synced     TIMESTAMP       NULL,
     PRIMARY KEY (puuid),
     INDEX idx_players_gamename (game_name, tag_line)
 ) ENGINE=InnoDB;
+
 
 CREATE TABLE matches (
     match_id        VARCHAR(36)     NOT NULL,
