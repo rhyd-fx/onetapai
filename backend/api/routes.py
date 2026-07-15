@@ -183,6 +183,20 @@ def _fetch_disposable_domains_task():
         # Sleep for 24 hours
         time.sleep(86400)
 
+def _check_kickbox_api(domain: str) -> bool:
+    """Query the Kickbox Open API for real-time verification of new temporary domains."""
+    try:
+        import urllib.parse
+        safe_domain = urllib.parse.quote(domain)
+        url = f"https://open.kickbox.com/v1/disposable/{safe_domain}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'OneTapAI/1.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            return data.get("disposable", False)
+    except Exception as e:
+        print(f"Kickbox API lookup failed for {domain}: {e}")
+        return False
+
 def _is_disposable_email(email: str) -> bool:
     if "@" not in email:
         return False
@@ -190,6 +204,7 @@ def _is_disposable_email(email: str) -> bool:
     domain = domain.lower().strip()
     
     global DISPOSABLE_DOMAINS
+    # 1. Quick local cache check (covers 99.9% of requests instantly)
     if domain in DISPOSABLE_DOMAINS:
         return True
         
@@ -200,6 +215,12 @@ def _is_disposable_email(email: str) -> bool:
         if parent_domain in DISPOSABLE_DOMAINS:
             return True
             
+    # 2. Live API fallback for brand-new domains not yet in the daily cached list
+    if _check_kickbox_api(domain):
+        # Cache it dynamically in memory so we don't hit the API again for this domain
+        DISPOSABLE_DOMAINS.add(domain)
+        return True
+        
     return False
 
 @app.on_event("startup")
