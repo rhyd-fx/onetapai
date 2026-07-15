@@ -136,7 +136,7 @@ def _send_verification_email(email: str, code: str) -> None:
     except Exception as e:
         print(f"Error sending verification email to {email}: {e}")
 
-DISPOSABLE_DOMAINS = {
+DISPOSABLE_DOMAINS = set([
     "10minutemail.com", "10minutemail.co.uk", "tempmail.com", "temp-mail.org",
     "mailinator.com", "yopmail.com", "guerrillamail.com", "guerrillamailblock.com",
     "guerrillamail.net", "guerrillamail.org", "guerrillamail.biz", "sharklasers.com",
@@ -146,17 +146,67 @@ DISPOSABLE_DOMAINS = {
     "fakeinbox.com", "moakt.com", "emailondeck.com", "harakirimail.com",
     "mailcatch.com", "fastmail.xyz", "temp-mail.ru", "temp-mail.com", "disposable.com",
     "zillamail.com", "spambox.us", "discardmail.com", "mailnull.com"
-}
+])
+
+def _fetch_disposable_domains_task():
+    global DISPOSABLE_DOMAINS
+    import urllib.request
+    import time
+    
+    cache_path = os.path.join(os.path.dirname(__file__), "disposable_domains_cache.json")
+    
+    # 1. Load from local cache file first
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, "r") as f:
+                cached_list = json.load(f)
+                DISPOSABLE_DOMAINS = set(cached_list)
+                print(f"Loaded {len(DISPOSABLE_DOMAINS)} disposable domains from local cache file.")
+    except Exception as e:
+        print(f"Error loading local disposable domains cache file: {e}")
+
+    # 2. Fetch from GitHub and save to cache file, repeating every 24 hours
+    url = "https://raw.githubusercontent.com/kickbox/disposable-email-domains/master/list.json"
+    while True:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                domains = json.loads(response.read().decode())
+                if isinstance(domains, list) and len(domains) > 0:
+                    DISPOSABLE_DOMAINS = set(domains)
+                    with open(cache_path, "w") as f:
+                        json.dump(domains, f)
+                    print(f"Successfully refreshed disposable domains list from Kickbox GitHub ({len(domains)} domains).")
+        except Exception as e:
+            print(f"Failed to fetch disposable domains from GitHub: {e}. Will retry in next interval.")
+        
+        # Sleep for 24 hours
+        time.sleep(86400)
 
 def _is_disposable_email(email: str) -> bool:
     if "@" not in email:
         return False
     _, domain = email.rsplit("@", 1)
     domain = domain.lower().strip()
-    for d in DISPOSABLE_DOMAINS:
-        if domain == d or domain.endswith("." + d):
+    
+    global DISPOSABLE_DOMAINS
+    if domain in DISPOSABLE_DOMAINS:
+        return True
+        
+    parts = domain.split(".")
+    # Check parent domains (subdomains)
+    for i in range(1, len(parts) - 1):
+        parent_domain = ".".join(parts[i:])
+        if parent_domain in DISPOSABLE_DOMAINS:
             return True
+            
     return False
+
+@app.on_event("startup")
+async def startup_event():
+    import threading
+    t = threading.Thread(target=_fetch_disposable_domains_task, daemon=True)
+    t.start()
 
 # Lazily-built retriever (loads the embedding model + Qdrant client once).
 _retriever: CoachingRetriever | None = None
