@@ -6,7 +6,40 @@ JSON-serializable Python values.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
+
+# Default "ranked" scope: the two modes that share the competitive stat model.
+# Passed as the default game_modes so callers that don't specify a filter keep
+# the historical competitive-only behavior.
+RANKED_MODES: tuple[str, ...] = ("Competitive", "Premier")
+
+
+def _match_filters(
+    game_modes: Sequence[str] | None,
+    season_id: str | None,
+    alias: str = "m",
+) -> tuple[str, list]:
+    """Build the shared `matches` WHERE fragment used by the stat queries.
+
+    Returns (filter_str, params) where filter_str is either "" or begins with
+    "AND ", ready to splice after an existing `WHERE ...` clause.
+
+    game_modes semantics:
+      - non-empty        -> `alias.game_mode IN (...)` for those modes
+      - None or empty [] -> no mode filter (all modes)
+    """
+    clauses: list[str] = []
+    params: list = []
+    if game_modes:
+        placeholders = ",".join(["%s"] * len(game_modes))
+        clauses.append(f"{alias}.game_mode IN ({placeholders})")
+        params.extend(game_modes)
+    if season_id:
+        clauses.append(f"{alias}.season_id = %s")
+        params.append(season_id)
+    filter_str = " AND ".join(clauses)
+    return (f"AND {filter_str}" if filter_str else ""), params
 
 _FEEDBACK_DDL = """
 CREATE TABLE IF NOT EXISTS coaching_feedback (
@@ -68,8 +101,8 @@ def resolve_puuid(conn, name: str, tag: str) -> str | None:
         return row["puuid"] if row else None
 
 
-def get_player_summary(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> dict | None:
-    """Identity + aggregate stats across matches filtered by season and competitive toggle."""
+def get_player_summary(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> dict | None:
+    """Identity + aggregate stats across matches filtered by season and game mode(s)."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT puuid, game_name, tag_line, region, card_uuid FROM players WHERE puuid = %s",
@@ -79,18 +112,7 @@ def get_player_summary(conn, puuid: str, season_id: str | None = None, competiti
         if not player:
             return None
 
-        # Build dynamic filters
-        clauses = []
-        params = []
-        if competitive_only:
-            clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-        if season_id:
-            clauses.append("m.season_id = %s")
-            params.append(season_id)
-            
-        filter_str = " AND ".join(clauses)
-        if filter_str:
-            filter_str = f"AND {filter_str}"
+        filter_str, params = _match_filters(game_modes, season_id)
 
         cur.execute(
             f"""
@@ -206,7 +228,7 @@ def get_engagement_locations(conn, puuid: str, map_id: str, limit: int = 50) -> 
     return {"deaths": deaths, "kills": kills}
 
 
-def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> dict:
+def get_telemetry(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> dict:
     """Advanced per-round telemetry derivable from ingested data.
 
     - movement_error_pct: % of death-rounds where the player dealt 0 damage
@@ -216,6 +238,8 @@ def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_on
       engagement (kill or death).
     - multikill_pct: % of rounds with 2+ kills.
     """
+    filter_str, params = _match_filters(game_modes, season_id)
+
     t = {
         "rounds": 0,
         "adr": None,                 # average damage per round (raw performance)
@@ -229,7 +253,7 @@ def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_on
     }
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT COUNT(*) AS rounds,
                    SUM(prs.damage_dealt) AS total_damage,
                    SUM(CASE WHEN prs.kills >= 2 THEN 1 ELSE 0 END) AS multi,
@@ -238,9 +262,9 @@ def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_on
             FROM player_round_stats prs
             JOIN rounds r ON prs.round_id = r.id
             JOIN matches m ON r.match_id = m.match_id
-            WHERE prs.puuid = %s AND m.game_mode IN ('Competitive', 'Premier')
+            WHERE prs.puuid = %s {filter_str}
             """,
-            (puuid,),
+            [puuid] + params,
         )
         r = cur.fetchone() or {}
         rounds = int(r.get("rounds") or 0)
@@ -253,7 +277,7 @@ def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_on
             t["movement_error_pct"] = round(int(r.get("zero_dmg") or 0) / death_rounds * 100, 1)
 
         cur.execute(
-            """
+            f"""
             SELECT SUM(CASE WHEN ke.killer_puuid = %s THEN 1 ELSE 0 END) AS opening_kills,
                    SUM(CASE WHEN ke.victim_puuid = %s THEN 1 ELSE 0 END) AS opening_deaths
             FROM kill_events ke
@@ -261,9 +285,9 @@ def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_on
             JOIN matches m ON r.match_id = m.match_id
             WHERE ke.is_opening_kill = TRUE
               AND (ke.killer_puuid = %s OR ke.victim_puuid = %s)
-              AND m.game_mode IN ('Competitive', 'Premier')
+              {filter_str}
             """,
-            (puuid, puuid, puuid, puuid),
+            [puuid, puuid, puuid, puuid] + params,
         )
         o = cur.fetchone() or {}
         ok, od = int(o.get("opening_kills") or 0), int(o.get("opening_deaths") or 0)
@@ -274,18 +298,18 @@ def get_telemetry(conn, puuid: str, season_id: str | None = None, competitive_on
             t["fk_fd_diff"] = ok - od
 
         cur.execute(
-            """
+            f"""
             SELECT AVG(first_ms) AS ttd FROM (
                 SELECT ke.round_id, MIN(ke.time_in_round_ms) AS first_ms
                 FROM kill_events ke
                 JOIN rounds r ON ke.round_id = r.id
                 JOIN matches m ON r.match_id = m.match_id
                 WHERE (ke.killer_puuid = %s OR ke.victim_puuid = %s)
-                  AND m.game_mode IN ('Competitive', 'Premier')
+                  {filter_str}
                 GROUP BY ke.round_id
             ) x
             """,
-            (puuid, puuid),
+            [puuid, puuid] + params,
         )
         tt = cur.fetchone() or {}
         if tt.get("ttd") is not None:
@@ -302,12 +326,13 @@ def get_match_timeline(conn, puuid: str, limit: int = 100) -> list[tuple[float, 
             FROM player_match_stats pms
             JOIN matches m ON pms.match_id = m.match_id
             WHERE pms.puuid = %s AND m.game_mode IN ('Competitive', 'Premier')
-            ORDER BY m.started_at ASC
+            ORDER BY m.started_at DESC
             LIMIT %s
             """,
             (puuid, int(limit)),
         )
-        rows = cur.fetchall()
+        # Most recent N, re-sorted chronologically for trend analysis.
+        rows = list(reversed(cur.fetchall()))
     return [(float(r["ts"]), float(r["acs"] or 0)) for r in rows if r["ts"] is not None]
 
 
@@ -335,18 +360,9 @@ def get_map_coord_samples(conn, map_id: str, limit: int = 20000) -> list[tuple[f
         return [(r["x"], r["y"]) for r in cur.fetchall()]
 
 
-def get_acs_trajectory(conn, puuid: str, limit: int = 20, season_id: str | None = None, competitive_only: bool = True) -> list[dict]:
+def get_acs_trajectory(conn, puuid: str, limit: int = 20, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> list[dict]:
     """Per-match ACS over time (chronological) for trajectory / tilt charts."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -360,12 +376,13 @@ def get_acs_trajectory(conn, puuid: str, limit: int = 20, season_id: str | None 
             FROM player_match_stats pms
             JOIN matches m ON pms.match_id = m.match_id
             WHERE pms.puuid = %s {filter_str}
-            ORDER BY m.started_at ASC
+            ORDER BY m.started_at DESC
             LIMIT %s
             """,
             [puuid] + params + [int(limit)],
         )
-        rows = cur.fetchall()
+        # Most recent N, re-sorted chronologically for the trajectory chart.
+        rows = list(reversed(cur.fetchall()))
 
     trajectory = []
     for r in rows:
@@ -392,18 +409,9 @@ def get_acs_trajectory(conn, puuid: str, limit: int = 20, season_id: str | None 
     return trajectory
 
 
-def get_top_maps(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> list[dict]:
+def get_top_maps(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> list[dict]:
     """Retrieve map statistics for a player, sorted by win rate."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -434,18 +442,9 @@ def get_top_maps(conn, puuid: str, season_id: str | None = None, competitive_onl
     ]
 
 
-def get_top_weapons(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> list[dict]:
+def get_top_weapons(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> list[dict]:
     """Retrieve weapon kill and shot distribution statistics for a player, sorted by kills."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -483,18 +482,9 @@ def get_top_weapons(conn, puuid: str, season_id: str | None = None, competitive_
     return weapons
 
 
-def get_aim_by_distance(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> list[dict]:
+def get_aim_by_distance(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> list[dict]:
     """Calculate shot distribution (headshot/bodyshot/legshot) percentages categorized by distance."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -546,18 +536,9 @@ def get_aim_by_distance(conn, puuid: str, season_id: str | None = None, competit
     return ranges
 
 
-def get_economy_efficiency(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> dict:
+def get_economy_efficiency(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> dict:
     """Calculate win rates by economy class and track eco round throws."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -619,18 +600,9 @@ def get_economy_efficiency(conn, puuid: str, season_id: str | None = None, compe
     }
 
 
-def get_side_bias(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> dict:
+def get_side_bias(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> dict:
     """Compare Attack vs. Defense round win rates and calculate early deaths on defense."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -739,18 +711,9 @@ def get_hardware_check(conn, puuid: str) -> dict:
         }
 
 
-def get_matchup_diagnostics(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> dict:
+def get_matchup_diagnostics(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> dict:
     """Analyze player death events to find matchup errors and utility deaths."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     gun_list = (
         'Vandal','Phantom','Sheriff','Spectre','Classic','Ghost','Marshal',
@@ -832,18 +795,9 @@ def get_matchup_diagnostics(conn, puuid: str, season_id: str | None = None, comp
     }
 
 
-def get_economy_split(conn, puuid: str, season_id: str | None = None, competitive_only: bool = True) -> dict:
+def get_economy_split(conn, puuid: str, season_id: str | None = None, game_modes: Sequence[str] | None = RANKED_MODES) -> dict:
     """Calculate ACS and round counts grouped by economy class (eco/half_buy/force_buy/full_buy)."""
-    clauses = []
-    params = []
-    if competitive_only:
-        clauses.append("m.game_mode IN ('Competitive', 'Premier')")
-    if season_id:
-        clauses.append("m.season_id = %s")
-        params.append(season_id)
-    filter_str = " AND ".join(clauses)
-    if filter_str:
-        filter_str = f"AND {filter_str}"
+    filter_str, params = _match_filters(game_modes, season_id)
 
     with conn.cursor() as cur:
         cur.execute(

@@ -10,8 +10,13 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import aiohttp
+
+# Henrik/Riot valid platform regions. Guards against path injection via a
+# user-supplied region and against wasted calls to nonexistent endpoints.
+VALID_REGIONS = frozenset({"na", "eu", "ap", "kr", "latam", "br"})
 
 # Make the shared `config` module importable regardless of working directory
 # (temporary shim until the backend is packaged with __init__.py files).
@@ -107,7 +112,10 @@ class HenrikAPIClient:
 
     async def get_account(self, name: str, tag: str) -> dict:
         """Fetch account info to get PUUID and region."""
-        url = f"{self._base_url}/valorant/v1/account/{name}/{tag}"
+        url = (
+            f"{self._base_url}/valorant/v1/account/"
+            f"{quote(name, safe='')}/{quote(tag, safe='')}"
+        )
         data = await self._request(url)
         return data["data"]
 
@@ -115,7 +123,17 @@ class HenrikAPIClient:
         self, region: str, name: str, tag: str, size: int = 5
     ) -> list[dict]:
         """Fetch latest full matches for a player (Henrik v3)."""
-        url = f"{self._base_url}/valorant/v3/matches/{region}/{name}/{tag}?size={size}&filter=competitive"
+        region = region.lower().strip()
+        if region not in VALID_REGIONS:
+            raise ValueError(
+                f"Invalid region {region!r}; expected one of {sorted(VALID_REGIONS)}."
+            )
+        size = max(1, min(int(size), 10))  # clamp to Henrik's supported range
+        url = (
+            f"{self._base_url}/valorant/v3/matches/"
+            f"{region}/{quote(name, safe='')}/{quote(tag, safe='')}"
+            f"?size={size}&filter=competitive"
+        )
         data = await self._request(url)
         return data.get("data", [])
 

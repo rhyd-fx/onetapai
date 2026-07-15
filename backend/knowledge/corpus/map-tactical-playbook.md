@@ -6,6 +6,15 @@ rank_range: all
 source: OneTap Coaching — Map Strategy
 ---
 
+## Current competitive map pool (V26 Act 4)
+The active ranked rotation is Summit, Sunset, Breeze, Haven, Lotus, Split, and
+Ascent. Bind, Fracture, and Pearl have rotated OUT of the competitive pool for
+this Act — they are still playable in Unrated, Swiftplay, and custom games and
+cycle back in future Acts, so their tactics remain useful, but do not assume they
+appear in ranked right now. Summit is the newest map and introduces permanent
+droppable walls. Riot keeps seven maps in rotation and updates the pool at the
+start of each Act.
+
 ## Bind: Teleporter Playbook and Site Executes
 Bind has no mid, making lane control on A-Bath, A-Short, B-Long, and B-Hookah crucial.
 - **A-Site Executes:** Duelists should entry through A-Short, while a support player pushes Bath (Showers). Controllers must smoke off Heaven and Lamps (U-Hall). Initiators should scan the back-site and trucks. Use the B-to-A teleporter for rapid rotations if B defense is heavily anchored.

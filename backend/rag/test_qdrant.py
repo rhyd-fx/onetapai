@@ -11,7 +11,7 @@ import config
 
 def main():
     print(f"Connecting to Qdrant at {config.QDRANT_HOST}:{config.QDRANT_PORT}...")
-    client = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
+    client = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT, api_key=config.QDRANT_API_KEY, https=config.QDRANT_HTTPS)
     print("Creating coaching_knowledge collection...")
     try:
         create_coaching_collection(client)

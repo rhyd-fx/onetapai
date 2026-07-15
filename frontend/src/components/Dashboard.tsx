@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Search, SlidersHorizontal, LogOut, User as UserIcon, Sparkles, Target, BrainCircuit, Activity, ChevronRight, Gamepad2 } from 'lucide-react';
+import { Search, SlidersHorizontal, LogOut, User as UserIcon, Sparkles, Target, BrainCircuit, Activity, ChevronRight, ChevronDown, Gamepad2 } from 'lucide-react';
 import { analyzePlayer, AnalyzeResponse, fetchRecentSearches } from '@/lib/api';
 import { buildViewModel, getSeasonName } from '@/lib/viewModel';
 import { useAuth } from '@/context/AuthContext';
@@ -153,6 +153,23 @@ function AgentAvatar({ agentName, iconUrl }: { agentName: string; iconUrl: strin
   );
 }
 
+// Fixed game-mode filter options. `modes` is sent to the API as `game_modes`
+// ([] = all modes). Strings are Henrik `metadata.mode` values (title-case).
+const MODE_OPTIONS: { id: string; label: string; modes: string[] }[] = [
+  { id: 'ranked', label: 'Ranked (Comp + Premier)', modes: ['Competitive', 'Premier'] },
+  { id: 'competitive', label: 'Competitive', modes: ['Competitive'] },
+  { id: 'premier', label: 'Premier', modes: ['Premier'] },
+  { id: 'unrated', label: 'Unrated', modes: ['Unrated'] },
+  { id: 'swiftplay', label: 'Swiftplay', modes: ['Swiftplay'] },
+  { id: 'spikerush', label: 'Spike Rush', modes: ['Spike Rush'] },
+  { id: 'deathmatch', label: 'Deathmatch', modes: ['Deathmatch'] },
+  { id: 'tdm', label: 'Team Deathmatch', modes: ['Team Deathmatch'] },
+  { id: 'all', label: 'All Modes', modes: [] },
+];
+
+const modesForId = (id: string): string[] =>
+  (MODE_OPTIONS.find((o) => o.id === id) ?? MODE_OPTIONS[0]).modes;
+
 export default function Dashboard() {
   const { isLoggedIn, user, logout, authLoading, refreshSession } = useAuth();
   const [riotId, setRiotId] = useState('');
@@ -161,8 +178,11 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<string | null>(null);
-  const [competitiveOnly, setCompetitiveOnly] = useState(true);
+  const [modeId, setModeId] = useState('ranked');
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
+  const [showAllMatches, setShowAllMatches] = useState(false);
+
+  const RECENT_MATCH_LIMIT = 10;
 
   useEffect(() => {
     if (isLoggedIn) {
@@ -194,7 +214,8 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     setSelectedSeason(null);
-    setCompetitiveOnly(true);
+    setModeId('ranked');
+    setShowAllMatches(false);
     try {
       setResult(await analyzePlayer(riotId.trim(), region));
       refreshSession();
@@ -207,7 +228,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleFilterChange = async (newSeason: string | null, newComp: boolean) => {
+  const handleFilterChange = async (newSeason: string | null, newModeId: string) => {
     if (!result) return;
     setLoading(true);
     setError(null);
@@ -215,7 +236,7 @@ export default function Dashboard() {
       const fullId = `${result.player_profile.game_name}#${result.player_profile.tag_line}`;
       const updated = await analyzePlayer(fullId, region, {
         seasonId: newSeason,
-        competitiveOnly: newComp,
+        gameModes: modesForId(newModeId),
         skipSync: true,
       });
       setResult(updated);
@@ -232,7 +253,8 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     setSelectedSeason(null);
-    setCompetitiveOnly(true);
+    setModeId('ranked');
+    setShowAllMatches(false);
     try {
       setResult(await analyzePlayer(id.trim(), playRegion));
       refreshSession();
@@ -247,6 +269,10 @@ export default function Dashboard() {
 
   const vm = result ? buildViewModel(result) : null;
   const heatmapMap = vm?.bestMap?.map ?? result?.acs_trajectory[0]?.map;
+
+  // Recent matches, newest first. Collapsed to the last 10 until "View all".
+  const allMatches = result ? result.acs_trajectory.slice().reverse() : [];
+  const visibleMatches = showAllMatches ? allMatches : allMatches.slice(0, RECENT_MATCH_LIMIT);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 md:px-8">
@@ -332,7 +358,7 @@ export default function Dashboard() {
                   onChange={(e) => {
                     const val = e.target.value || null;
                     setSelectedSeason(val);
-                    handleFilterChange(val, competitiveOnly);
+                    handleFilterChange(val, modeId);
                   }}
                   className="rounded-lg border border-line bg-ink-800/80 px-2.5 py-1.5 text-xs font-medium text-white outline-none focus:border-brand-red/60"
                 >
@@ -345,39 +371,24 @@ export default function Dashboard() {
                 </select>
               </div>
 
-              {/* Competitive toggle */}
+              {/* Game mode selection */}
               <div className="flex items-center gap-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted">Mode:</span>
-                <div className="flex rounded-lg border border-line bg-ink-800/80 p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCompetitiveOnly(true);
-                      handleFilterChange(selectedSeason, true);
-                    }}
-                    className={`rounded-md px-3 py-1 text-xs font-medium transition ${
-                      competitiveOnly
-                        ? 'bg-brand-red text-white shadow-sm glow-red'
-                        : 'text-muted hover:text-white'
-                    }`}
-                  >
-                    Comp Only
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCompetitiveOnly(false);
-                      handleFilterChange(selectedSeason, false);
-                    }}
-                    className={`rounded-md px-3 py-1 text-xs font-medium transition ${
-                      !competitiveOnly
-                        ? 'bg-ink-700 text-white border border-line'
-                        : 'text-muted hover:text-white'
-                    }`}
-                  >
-                    All Modes
-                  </button>
-                </div>
+                <select
+                  value={modeId}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setModeId(val);
+                    handleFilterChange(selectedSeason, val);
+                  }}
+                  className="rounded-lg border border-line bg-ink-800/80 px-2.5 py-1.5 text-xs font-medium text-white outline-none focus:border-brand-red/60"
+                >
+                  {MODE_OPTIONS.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           </div>
@@ -422,12 +433,14 @@ export default function Dashboard() {
                     <SectionTitle>Recent Match History</SectionTitle>
                   </div>
                   <span className="text-[10px] uppercase tracking-widest text-muted/60 bg-white/[0.03] px-3 py-1 rounded-full border border-white/[0.06]">
-                    Last {result.acs_trajectory.length} Matches
+                    {showAllMatches
+                      ? `All ${allMatches.length} Matches`
+                      : `Last ${visibleMatches.length} Matches`}
                   </span>
                 </div>
 
                 <div className="space-y-3">
-                  {result.acs_trajectory.slice().reverse().map((m: any, i: number) => {
+                  {visibleMatches.map((m: any, i: number) => {
                     const win = m.won;
                     const kills = m.kills ?? 0;
                     const deaths = m.deaths ?? 0;
@@ -568,6 +581,24 @@ export default function Dashboard() {
                     );
                   })}
                 </div>
+
+                {allMatches.length > RECENT_MATCH_LIMIT && (
+                  <div className="mt-5 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => setShowAllMatches((v) => !v)}
+                      className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-5 py-2 text-[11px] font-black uppercase tracking-widest text-muted/80 transition-all duration-300 hover:border-brand-red/30 hover:bg-brand-red/[0.06] hover:text-white"
+                    >
+                      {showAllMatches
+                        ? 'Show less'
+                        : `View all ${allMatches.length} matches`}
+                      <ChevronDown
+                        size={14}
+                        className={`transition-transform duration-300 ${showAllMatches ? 'rotate-180' : ''}`}
+                      />
+                    </button>
+                  </div>
+                )}
               </Panel>
             </section>
           )}
@@ -578,7 +609,7 @@ export default function Dashboard() {
           <section className="grid gap-4 lg:grid-cols-3">
             <Panel glow="red" className="flex flex-col p-5 lg:col-span-2">
               <SectionTitle>Live Coach · RAG</SectionTitle>
-              <div className="h-80">
+              <div className="min-h-[20rem] flex-1">
                 {/* key resets the chat (greeting + history) when the player changes */}
                 <CoachPanel key={vm.riotId} riotId={vm.riotId} />
               </div>

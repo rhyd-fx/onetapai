@@ -98,8 +98,13 @@ export default function ShareCard({ vm }: { vm: DashboardVM }) {
               <span className="text-sm font-black text-white truncate max-w-[70%]">{name}</span>
               <span className="text-[10px] font-bold text-muted truncate">#{tag}</span>
             </div>
-            <div className="text-[8px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border border-brand-red/30 bg-brand-red/15 text-brand-red mt-1 inline-block">
-              {vm.tier.label}
+            <div className="flex flex-col items-start mt-1.5 px-2 py-1 rounded border border-brand-red/30 bg-brand-red/15 text-left w-fit max-w-full">
+              <span className="text-[7px] font-black uppercase tracking-wider text-brand-red leading-none">
+                {vm.tier.label}
+              </span>
+              <span className="text-[5px] font-bold uppercase tracking-widest text-muted mt-0.5 leading-none">
+                {vm.tier.hint}
+              </span>
             </div>
           </div>
         </div>
@@ -219,8 +224,26 @@ export default function ShareCard({ vm }: { vm: DashboardVM }) {
                   <span style={{ fontSize: 72, fontWeight: 900, color: '#ffffff', letterSpacing: -1 }}>{name}</span>
                   <span style={{ fontSize: 36, fontWeight: 700, color: MUTED, marginLeft: 16 }}>#{tag}</span>
                 </div>
-                <div style={{ display: 'inline-block', marginTop: 20, padding: '8px 20px', background: 'rgba(255, 70, 85, 0.12)', border: `2px solid ${RED}`, borderRadius: 14, color: RED, fontWeight: 900, fontSize: 22, letterSpacing: 4, textTransform: 'uppercase' }}>
-                  {vm.tier.label}
+                <div style={{ 
+                  display: 'inline-flex', 
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginTop: 20, 
+                  padding: '10px 24px', 
+                  background: 'rgba(255, 70, 85, 0.12)', 
+                  border: `2px solid ${RED}`, 
+                  borderRadius: 16, 
+                  color: RED,
+                  textAlign: 'center',
+                  boxSizing: 'border-box'
+                }}>
+                  <div style={{ fontWeight: 900, fontSize: 22, letterSpacing: 4, textTransform: 'uppercase', lineHeight: 1 }}>
+                    {vm.tier.label}
+                  </div>
+                  <div style={{ color: MUTED, fontWeight: 800, fontSize: 11, letterSpacing: 2, textTransform: 'uppercase', marginTop: 6, lineHeight: 1 }}>
+                    {vm.tier.hint}
+                  </div>
                 </div>
               </div>
               <div style={{ color: MUTED, fontSize: 24, letterSpacing: 4, fontWeight: 900, paddingBottom: 10 }}>{vm.region.toUpperCase()}</div>

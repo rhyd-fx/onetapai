@@ -348,9 +348,20 @@ export function buildViewModel(r: AnalyzeResponse): DashboardVM {
   const ecoThrows = r.economy_efficiency?.eco_throws ?? 0;
 
   const roleStats = calculateRolePerformance(r.acs_trajectory);
+  // Only crown a "best role" (and recommend leaning into it) when it's backed
+  // by a real sample — a 1–2 game hot streak isn't evidence. Among eligible
+  // roles, rank by a win rate shrunk toward the player's overall WR (same
+  // Bayesian idea as mapPerf), so a small-but-qualifying sample can't leapfrog
+  // a well-sampled role. If no role clears the bar, bestRole is undefined and
+  // the UI falls back to the "Flex player" message.
+  const ROLE_MIN_GAMES = 3;
+  const overallWr = p.win_rate ?? 50;      // prior the win rate shrinks toward
+  const K = 4;                              // prior strength, in virtual games
+  const roleScore = (rs: RolePerformance) =>
+    (rs.winRate * rs.games + overallWr * K) / (rs.games + K);
   const bestRole = [...roleStats]
-    .filter(rs => rs.games > 0)
-    .sort((a, b) => b.winRate - a.winRate || b.avgAcs - a.avgAcs)[0];
+    .filter(rs => rs.games >= ROLE_MIN_GAMES)
+    .sort((a, b) => roleScore(b) - roleScore(a) || b.avgAcs - a.avgAcs)[0];
 
   const quote = getBrutalQuote(
     hs,

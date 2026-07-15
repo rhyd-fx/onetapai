@@ -80,7 +80,7 @@ def main() -> None:
     ap.add_argument("--recreate", action="store_true", help="drop & recreate the collection")
     args = ap.parse_args()
 
-    client = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT)
+    client = QdrantClient(host=config.QDRANT_HOST, port=config.QDRANT_PORT, api_key=config.QDRANT_API_KEY)
 
     if args.recreate and client.collection_exists(COLLECTION):
         client.delete_collection(COLLECTION)

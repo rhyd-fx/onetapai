@@ -37,9 +37,10 @@ async def analyze_player(ctx, riot_id: str):
         embed.set_footer(text="Powered by OneTap AI Radiant Engine")
         
         await ctx.send(embed=embed)
-        
+
     except Exception as e:
-        await ctx.send(f"❌ Failed to analyze player. Error: {str(e)}")
+        print(f"[analyze] error for {riot_id!r}: {e}")
+        await ctx.send("❌ Failed to analyze player. Please check the Riot ID and try again later.")
 
 @bot.command(name='coach')
 async def ask_coach(ctx, riot_id: str, *, question: str):
@@ -59,9 +60,10 @@ async def ask_coach(ctx, riot_id: str, *, question: str):
         
         embed = discord.Embed(title=f"OneTap AI Coach", description=answer, color=discord.Color.gold())
         await ctx.send(embed=embed)
-        
+
     except Exception as e:
-        await ctx.send(f"❌ Failed to reach the coach. Error: {str(e)}")
+        print(f"[coach] error for {riot_id!r}: {e}")
+        await ctx.send("❌ Failed to reach the coach. Please try again later.")
 
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_BOT_TOKEN")

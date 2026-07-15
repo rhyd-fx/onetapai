@@ -1,9 +1,13 @@
 import os
 import sys
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # Make sibling packages (config, ingestion, analysis, api) importable regardless
 # of working directory (temporary shim until the backend is packaged).
@@ -16,6 +20,7 @@ from analysis.spatial import coordinates
 from analysis.mental.tilt_detector import detect_tilt
 from dataclasses import asdict
 from api.queries import (
+    RANKED_MODES,
     resolve_puuid,
     get_player_summary,
     get_acs_trajectory,
@@ -74,6 +79,48 @@ def _profile_for_prompt(summary: dict | None, aim: dict, telemetry: dict | None 
     return res
 
 app = FastAPI(title="OneTap AI", version="1.0.0")
+
+# Rate limiting (per client IP). Throttles credential brute-force on the auth
+# endpoints and abuse of the external-API-fanning analyze/coach endpoints.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Per-account login lockout. The IP rate limit above is bypassable with rotating
+# IPs; this caps failed attempts against a single account regardless of source.
+# In-process (single-worker) — move to Redis for multi-worker deployments.
+import threading
+import time as _time
+
+_LOGIN_MAX_FAILS = 5
+_LOGIN_LOCKOUT_SECONDS = 900  # 15 min
+_login_fails: dict[str, tuple[int, float]] = {}  # key -> (count, first_fail_ts)
+_login_fails_lock = threading.Lock()
+
+
+def _login_locked(key: str) -> bool:
+    with _login_fails_lock:
+        entry = _login_fails.get(key)
+        if not entry:
+            return False
+        count, first_ts = entry
+        if _time.time() - first_ts > _LOGIN_LOCKOUT_SECONDS:
+            del _login_fails[key]  # window expired
+            return False
+        return count >= _LOGIN_MAX_FAILS
+
+
+def _record_login_fail(key: str) -> None:
+    with _login_fails_lock:
+        count, first_ts = _login_fails.get(key, (0, _time.time()))
+        if _time.time() - first_ts > _LOGIN_LOCKOUT_SECONDS:
+            count, first_ts = 0, _time.time()  # reset stale window
+        _login_fails[key] = (count + 1, first_ts)
+
+
+def _clear_login_fails(key: str) -> None:
+    with _login_fails_lock:
+        _login_fails.pop(key, None)
 
 # CORS for the Next.js frontend (origins from config/.env).
 app.add_middleware(
@@ -145,7 +192,9 @@ class AnalysisRequest(BaseModel):
     region: str = "na"
     match_count: int = 20           # How many recent matches to analyze
     season_id: str | None = None
-    competitive_only: bool = True
+    # Game-mode filter. Omitted/None -> Ranked (Competitive + Premier);
+    # [] -> all modes; ["Unrated", ...] -> those modes only.
+    game_modes: list[str] | None = None
     skip_sync: bool = False
 
 
@@ -215,7 +264,10 @@ def _connect():
     try:
         return get_db_connection()
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Database unavailable: {e}")
+        # Log the real error server-side; return a generic message so DSN/host
+        # fragments aren't leaked to clients.
+        print(f"DB connection failed: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again shortly.")
 
 
 def _build_aim_profile(summary: dict, telemetry: dict | None = None, aim_by_distance: list[dict] | None = None) -> dict:
@@ -226,14 +278,17 @@ def _build_aim_profile(summary: dict, telemetry: dict | None = None, aim_by_dist
     if hs is None or bs is None:
         return {"available": False, "reason": "no hit-distribution data yet"}
 
+    # Fall back to the overall HS rate for range buckets with no kills — an
+    # empty bucket is missing data, not a 0% headshot rate (which would falsely
+    # trigger OVER_FLICKING).
     hs_short = hs
     hs_long = hs
     if aim_by_distance:
         close_stats = next((a for a in aim_by_distance if a["range"] == "close"), None)
         long_stats = next((a for a in aim_by_distance if a["range"] == "long"), None)
-        if close_stats:
+        if close_stats and close_stats.get("kills"):
             hs_short = (close_stats.get("headshot_pct") or 0.0) / 100
-        if long_stats:
+        if long_stats and long_stats.get("kills"):
             hs_long = (long_stats.get("headshot_pct") or 0.0) / 100
 
     zero_dmg_pct = 0.0
@@ -268,15 +323,16 @@ async def health():
 
 
 @app.post("/api/v1/auth/register")
-async def auth_register(req: RegisterRequest):
+@limiter.limit("5/minute")
+async def auth_register(request: Request, req: RegisterRequest):
     username = req.username.strip()
     email = req.email.strip().lower()
     password = req.password
     
     if len(username) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+    if len(password) < 12:
+        raise HTTPException(status_code=400, detail="Password must be at least 12 characters.")
         
     conn = _connect()
     try:
@@ -298,10 +354,18 @@ async def auth_register(req: RegisterRequest):
 
 
 @app.post("/api/v1/auth/login")
-async def auth_login(req: LoginRequest):
+@limiter.limit("10/minute")
+async def auth_login(request: Request, req: LoginRequest):
     user_input = req.username_or_email.strip()
     password = req.password
-    
+
+    lockout_key = user_input.lower()
+    if _login_locked(lockout_key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Try again in 15 minutes.",
+        )
+
     conn = _connect()
     try:
         with conn.cursor() as cur:
@@ -311,14 +375,16 @@ async def auth_login(req: LoginRequest):
             )
             user = cur.fetchone()
             if not user or not verify_password(password, user["password_hash"]):
+                _record_login_fail(lockout_key)
                 raise HTTPException(status_code=401, detail="Invalid username or password.")
-                
+
+            _clear_login_fails(lockout_key)
             token = generate_jwt({
                 "user_id": user["id"],
                 "username": user["username"],
                 "email": user["email"]
             })
-            
+
             return {
                 "token": token,
                 "username": user["username"]
@@ -448,7 +514,8 @@ async def _sync_from_henrik(name: str, tag: str, region: str, size: int) -> dict
 
 
 @app.post("/api/v1/analyze")
-async def analyze_player(req: AnalysisRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("20/minute")
+async def analyze_player(request: Request, req: AnalysisRequest, user: dict = Depends(get_current_user)):
     """Fetch the player's recent matches live from Henrik, ingest new ones, then
     analyze: identity + aggregate stats, mechanical aim profile, ACS trajectory."""
     name, tag = _split_riot_id(req.riot_id)
@@ -502,18 +569,20 @@ async def analyze_player(req: AnalysisRequest, user: dict = Depends(get_current_
         except Exception as e:
             print(f"Error updating user profile history: {e}")
 
-        summary = get_player_summary(conn, puuid, req.season_id, req.competitive_only)
-        trajectory = get_acs_trajectory(conn, puuid, limit=req.match_count, season_id=req.season_id, competitive_only=req.competitive_only)
-        telemetry = get_telemetry(conn, puuid, req.season_id, req.competitive_only)
-        top_maps = get_top_maps(conn, puuid, req.season_id, req.competitive_only)
-        top_weapons = get_top_weapons(conn, puuid, req.season_id, req.competitive_only)
-        aim_by_distance = get_aim_by_distance(conn, puuid, req.season_id, req.competitive_only)
-        economy_efficiency = get_economy_efficiency(conn, puuid, req.season_id, req.competitive_only)
-        side_bias = get_side_bias(conn, puuid, req.season_id, req.competitive_only)
+        # None (omitted) -> Ranked default; [] -> all modes; [..] -> those modes.
+        modes = list(RANKED_MODES) if req.game_modes is None else req.game_modes
+        summary = get_player_summary(conn, puuid, req.season_id, game_modes=modes)
+        trajectory = get_acs_trajectory(conn, puuid, limit=req.match_count, season_id=req.season_id, game_modes=modes)
+        telemetry = get_telemetry(conn, puuid, req.season_id, game_modes=modes)
+        top_maps = get_top_maps(conn, puuid, req.season_id, game_modes=modes)
+        top_weapons = get_top_weapons(conn, puuid, req.season_id, game_modes=modes)
+        aim_by_distance = get_aim_by_distance(conn, puuid, req.season_id, game_modes=modes)
+        economy_efficiency = get_economy_efficiency(conn, puuid, req.season_id, game_modes=modes)
+        side_bias = get_side_bias(conn, puuid, req.season_id, game_modes=modes)
         hardware_check = get_hardware_check(conn, puuid)
         seasons = get_player_seasons(conn, puuid)
-        matchup_diagnostics = get_matchup_diagnostics(conn, puuid, req.season_id, req.competitive_only)
-        economy_split = get_economy_split(conn, puuid, req.season_id, req.competitive_only)
+        matchup_diagnostics = get_matchup_diagnostics(conn, puuid, req.season_id, game_modes=modes)
+        economy_split = get_economy_split(conn, puuid, req.season_id, game_modes=modes)
     finally:
         conn.close()
 
@@ -552,7 +621,8 @@ async def acs_trajectory(riot_id: str, last_n: int = 20, user: dict = Depends(ge
 # --- Not yet wired (stubs kept so the contract is visible) ---
 
 @app.post("/api/v1/coach", response_model=CoachingResponse)
-async def coaching_chat(req: CoachingQuestion, user: dict = Depends(get_current_user)):
+@limiter.limit("15/minute")
+async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = Depends(get_current_user)):
     """RAG-powered coaching Q&A: retrieve relevant knowledge, ground it in the
     player's stats (when available), and generate a response via OpenRouter."""
     # Player context is optional — a general question still works. DB failure
@@ -580,7 +650,8 @@ async def coaching_chat(req: CoachingQuestion, user: dict = Depends(get_current_
     try:
         chunks = _get_retriever().retrieve(req.question)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=f"Knowledge retrieval unavailable: {e}")
+        print(f"Knowledge retrieval failed: {e}")
+        raise HTTPException(status_code=503, detail="Coaching knowledge is temporarily unavailable.")
 
     messages = build_coaching_prompt(
         profile,
@@ -591,7 +662,8 @@ async def coaching_chat(req: CoachingQuestion, user: dict = Depends(get_current_
     try:
         answer = llm.generate_coaching_response(messages)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"LLM generation failed: {e}")
+        print(f"LLM generation failed: {e}")
+        raise HTTPException(status_code=502, detail="The coach is temporarily unavailable. Please try again.")
 
     return CoachingResponse(
         answer=answer,

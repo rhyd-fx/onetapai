@@ -160,7 +160,9 @@ export interface AnalyzeResponse {
 
 export interface AnalyzeRequestOptions {
   seasonId?: string | null;
-  competitiveOnly?: boolean;
+  // Modes to include. undefined -> Ranked (Comp + Premier); [] -> all modes;
+  // ["Unrated", ...] -> those modes only.
+  gameModes?: string[];
   skipSync?: boolean;
 }
 
@@ -176,7 +178,7 @@ export async function analyzePlayer(
       riot_id: riotId,
       region,
       season_id: options?.seasonId,
-      competitive_only: options?.competitiveOnly ?? true,
+      game_modes: options?.gameModes ?? ["Competitive", "Premier"],
       skip_sync: options?.skipSync ?? false,
     }),
   });

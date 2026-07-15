@@ -8,7 +8,14 @@ import base64
 # Simple, highly secure, zero-dependency password hashing and JWT utility.
 # Avoids any passlib/bcrypt binary build errors under React 19 / Python 3.12 environments.
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "onetapai-esports-radial-secret-key-1092")
+# Fail closed: never fall back to a committed default secret. A hardcoded key
+# lets anyone with the repo forge a token for any user. Require it from the env.
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise RuntimeError(
+        "JWT_SECRET_KEY must be set to a strong (>=32 char) random value. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
 
 def hash_password(password: str) -> str:
     """Hash a password using PBKDF2-HMAC-SHA256 with a unique salt."""
@@ -41,8 +48,13 @@ def base64url_decode(data: str) -> bytes:
     padding = '=' * (4 - len(data) % 4)
     return base64.urlsafe_b64decode(data + padding)
 
-def generate_jwt(payload: dict, expires_in_seconds: int = 86400) -> str:
-    """Generate a signed JWT token (HS256) valid for a specific duration."""
+def generate_jwt(payload: dict, expires_in_seconds: int = 3600) -> str:
+    """Generate a signed JWT token (HS256) valid for a specific duration.
+
+    Default lifetime is 1 hour. Shorter-lived access tokens limit the damage
+    window if a token is stolen (e.g. via XSS from localStorage). Pair with a
+    refresh flow for longer sessions.
+    """
     header = {"alg": "HS256", "typ": "JWT"}
     
     # Set expiration time

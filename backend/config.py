@@ -88,6 +88,11 @@ OPENROUTER_MODEL = get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:fr
 # --- Vector DB (Qdrant) ---
 QDRANT_HOST = get("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(get("QDRANT_PORT", "6333"))
+# Optional. If set, must match Qdrant's QDRANT__SERVICE__API_KEY. Leave unset
+# for local dev; set in any deployment where Qdrant is network-reachable.
+QDRANT_API_KEY = get("QDRANT_API_KEY")
+QDRANT_HTTPS = get("QDRANT_HTTPS", "false").lower() == "true"
+
 
 # --- Cache / queue (Redis) ---
 REDIS_URL = get("REDIS_URL", "redis://localhost:6379/0")
@@ -99,10 +104,12 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 # Also allow localhost + private-LAN origins on any port (so the frontend works
-# when accessed via a machine's LAN IP in dev, not just localhost).
+# when accessed via a machine's LAN IP in dev, not just localhost). Scoped to
+# localhost/LAN by default — NOT a wildcard, which would defeat CORS entirely
+# when combined with allow_credentials. Override via CORS_ORIGIN_REGEX for prod.
 CORS_ORIGIN_REGEX = get(
     "CORS_ORIGIN_REGEX",
-    r"https?://.*",
+    r"https?://(localhost|127\.0\.0\.1|(10|172\.(1[6-9]|2\d|3[01])|192\.168)\.[\d.]+)(:\d+)?",
 )
 
 # --- Henrik API rate limiting (free tier is ~30 req/min) ---
