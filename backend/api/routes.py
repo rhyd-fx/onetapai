@@ -136,6 +136,28 @@ def _send_verification_email(email: str, code: str) -> None:
     except Exception as e:
         print(f"Error sending verification email to {email}: {e}")
 
+DISPOSABLE_DOMAINS = {
+    "10minutemail.com", "10minutemail.co.uk", "tempmail.com", "temp-mail.org",
+    "mailinator.com", "yopmail.com", "guerrillamail.com", "guerrillamailblock.com",
+    "guerrillamail.net", "guerrillamail.org", "guerrillamail.biz", "sharklasers.com",
+    "dispostable.com", "getairmail.com", "throwawaymail.com", "generator.email",
+    "maildrop.cc", "mailnesia.com", "mailac.co", "mintemail.com", "mytrashmail.com",
+    "getnada.com", "boun.cr", "trashmail.com", "burnermail.io", "tempmailaddress.com",
+    "fakeinbox.com", "moakt.com", "emailondeck.com", "harakirimail.com",
+    "mailcatch.com", "fastmail.xyz", "temp-mail.ru", "temp-mail.com", "disposable.com",
+    "zillamail.com", "spambox.us", "discardmail.com", "mailnull.com"
+}
+
+def _is_disposable_email(email: str) -> bool:
+    if "@" not in email:
+        return False
+    _, domain = email.rsplit("@", 1)
+    domain = domain.lower().strip()
+    for d in DISPOSABLE_DOMAINS:
+        if domain == d or domain.endswith("." + d):
+            return True
+    return False
+
 # Lazily-built retriever (loads the embedding model + Qdrant client once).
 _retriever: CoachingRetriever | None = None
 
@@ -426,6 +448,12 @@ async def auth_register(request: Request, req: RegisterRequest):
     email = req.email.strip().lower()
     password = req.password
     
+    if _is_disposable_email(email):
+        raise HTTPException(
+            status_code=400,
+            detail="Disposable or temporary email addresses are not allowed. Please use a valid, permanent email address."
+        )
+        
     if len(username) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
     if len(password) < 12:
