@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { loginUser, registerUser, verifyUserSession, AuthResponse } from '@/lib/api';
+import { loginUser, registerUser, verifyRegisterUser, verifyUserSession, AuthResponse } from '@/lib/api';
 
 interface UserProfile {
   user_id: number;
@@ -15,7 +15,8 @@ interface AuthContextType {
   isLoggedIn: boolean;
   authLoading: boolean;
   login: (usernameOrEmail: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string) => Promise<any>;
+  verifyRegister: (email: string, code: string) => Promise<void>;
   logout: () => void;
   refreshSession: () => Promise<void>;
   authError: string | null;
@@ -72,9 +73,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = async (username: string, email: string, password: string) => {
     setAuthError(null);
     try {
-      await registerUser(username, email, password);
+      return await registerUser(username, email, password);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Registration failed";
+      setAuthError(msg);
+      throw err;
+    }
+  };
+
+  const verifyRegister = async (email: string, code: string) => {
+    setAuthError(null);
+    try {
+      const res: AuthResponse = await verifyRegisterUser(email, code);
+      localStorage.setItem("onetap_token", res.token);
+      localStorage.setItem("onetap_username", res.username);
+      
+      const u = await verifyUserSession();
+      setUser(u);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Verification failed";
       setAuthError(msg);
       throw err;
     }
@@ -108,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authLoading,
         login,
         register,
+        verifyRegister,
         logout,
         refreshSession,
         authError,

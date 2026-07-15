@@ -285,7 +285,13 @@ export async function loginUser(usernameOrEmail: string, password: string): Prom
   return res.json();
 }
 
-export async function registerUser(username: string, email: string, password: string): Promise<{ success: boolean; message: string }> {
+export interface RegisterResponse {
+  status: string;
+  email: string;
+  message: string;
+}
+
+export async function registerUser(username: string, email: string, password: string): Promise<RegisterResponse> {
   const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -294,6 +300,19 @@ export async function registerUser(username: string, email: string, password: st
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `Registration failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function verifyRegisterUser(email: string, code: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/auth/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, code }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Verification failed (${res.status})`);
   }
   return res.json();
 }

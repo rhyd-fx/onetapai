@@ -43,6 +43,98 @@ from api.auth_utils import hash_password, verify_password, generate_jwt, verify_
 from rag.retriever import CoachingRetriever
 from rag.prompt_builder import build_coaching_prompt
 from rag import llm
+import redis
+import json
+import random
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from typing import Dict, Any
+
+# Initialize Redis client.
+try:
+    redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
+except Exception as e:
+    print(f"Failed to connect to Redis: {e}")
+    redis_client = None
+
+_memory_cache: Dict[str, Dict[str, Any]] = {}
+
+def get_cache_value(key: str) -> str | None:
+    if redis_client:
+        try:
+            return redis_client.get(key)
+        except Exception:
+            pass
+    return json.dumps(_memory_cache.get(key)) if key in _memory_cache else None
+
+def set_cache_value(key: str, value: str, ttl: int) -> None:
+    if redis_client:
+        try:
+            redis_client.setex(key, ttl, value)
+            return
+        except Exception:
+            pass
+    _memory_cache[key] = json.loads(value)
+
+def delete_cache_value(key: str) -> None:
+    if redis_client:
+        try:
+            redis_client.delete(key)
+            return
+        except Exception:
+            pass
+    _memory_cache.pop(key, None)
+
+def _send_verification_email(email: str, code: str) -> None:
+    subject = "Verify your OneTap AI account"
+    body = f"""
+    <div style="font-family: Arial, sans-serif; background-color: #0c0f12; color: #f0f4f8; padding: 30px; border-radius: 8px; max-width: 600px; margin: 0 auto; border: 1px solid #1a222a;">
+        <h2 style="color: #ff4655; border-bottom: 2px solid #ff4655; padding-bottom: 10px; margin-top: 0;">Welcome to OneTap AI!</h2>
+        <p style="font-size: 16px; line-height: 1.5; color: #a0aab5;">Please use the following 6-digit verification code to activate your account:</p>
+        <div style="background-color: #161c22; border: 1px solid #ff4655; border-radius: 6px; padding: 15px; text-align: center; margin: 25px 0;">
+            <span style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #ff4655;">{code}</span>
+        </div>
+        <p style="font-size: 14px; color: #6d7a86; line-height: 1.5;">This code will expire in 15 minutes. If you did not request this, you can safely ignore this email.</p>
+        <hr style="border: 0; border-top: 1px solid #1c2630; margin: 30px 0;" />
+        <p style="font-size: 11px; text-align: center; color: #52606d;">OneTap AI Coaching Platform &copy; 2026</p>
+    </div>
+    """
+    
+    # Always print clearly to the console logs
+    print(f"\n==================================================")
+    print(f"[EMAIL VERIFICATION] To: {email} | Code: {code}")
+    print(f"==================================================\n")
+    
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = os.getenv("SMTP_PORT")
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_from = os.getenv("SMTP_FROM", smtp_user)
+    
+    if not (smtp_host and smtp_port and smtp_user and smtp_password):
+        return
+        
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = smtp_from
+        msg["To"] = email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "html"))
+        
+        port = int(smtp_port)
+        if port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, port, timeout=5)
+        else:
+            server = smtplib.SMTP(smtp_host, port, timeout=5)
+            server.starttls()
+            
+        server.login(smtp_user, smtp_password)
+        server.sendmail(smtp_from, email, msg.as_string())
+        server.quit()
+        print(f"Verification email successfully sent to {email}")
+    except Exception as e:
+        print(f"Error sending verification email to {email}: {e}")
 
 # Lazily-built retriever (loads the embedding model + Qdrant client once).
 _retriever: CoachingRetriever | None = None
@@ -225,6 +317,11 @@ class RegisterRequest(BaseModel):
     password: str
 
 
+class VerifyRegisterRequest(BaseModel):
+    email: str
+    code: str
+
+
 class LoginRequest(BaseModel):
     username_or_email: str
     password: str
@@ -340,17 +437,85 @@ async def auth_register(request: Request, req: RegisterRequest):
             cur.execute("SELECT id FROM users WHERE username = %s OR email = %s", (username, email))
             if cur.fetchone():
                 raise HTTPException(status_code=400, detail="Username or email is already registered.")
-            
-            pwd_hash = hash_password(password)
+    finally:
+        conn.close()
+        
+    pwd_hash = hash_password(password)
+    
+    # Generate 6-digit numeric verification code
+    code = f"{random.randint(100000, 999999)}"
+    
+    # Store registration details in cache for 15 minutes
+    reg_data = {
+        "username": username,
+        "email": email,
+        "password_hash": pwd_hash,
+        "code": code
+    }
+    
+    set_cache_value(f"verify_reg:{email}", json.dumps(reg_data), 900)
+    
+    # Send verification email asynchronously / best-effort
+    _send_verification_email(email, code)
+    
+    return {
+        "status": "verification_sent",
+        "email": email,
+        "message": "Verification code sent to your email address."
+    }
+
+
+@app.post("/api/v1/auth/verify")
+@limiter.limit("10/minute")
+async def auth_verify(request: Request, req: VerifyRegisterRequest):
+    email = req.email.strip().lower()
+    code = req.code.strip()
+    
+    cached_data_str = get_cache_value(f"verify_reg:{email}")
+    if not cached_data_str:
+        raise HTTPException(status_code=400, detail="Verification code expired or not found. Please sign up again.")
+        
+    reg_data = json.loads(cached_data_str)
+    if reg_data.get("code") != code:
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+        
+    username = reg_data["username"]
+    pwd_hash = reg_data["password_hash"]
+    
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            # Recheck just in case someone registered in the meantime
+            cur.execute("SELECT id FROM users WHERE username = %s OR email = %s", (username, email))
+            if cur.fetchone():
+                raise HTTPException(status_code=400, detail="Username or email is already registered.")
+                
             cur.execute(
                 "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s)",
                 (username, email, pwd_hash)
             )
             conn.commit()
+            
+            # Get user ID
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            user = cur.fetchone()
     finally:
         conn.close()
         
-    return {"success": True, "message": "User registered successfully."}
+    # Delete from cache
+    delete_cache_value(f"verify_reg:{email}")
+    
+    # Generate JWT token directly so they are immediately logged in
+    token = generate_jwt({
+        "user_id": user["id"],
+        "username": username,
+        "email": email
+    })
+    
+    return {
+        "token": token,
+        "username": username
+    }
 
 
 @app.post("/api/v1/auth/login")

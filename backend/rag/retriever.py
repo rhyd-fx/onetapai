@@ -51,6 +51,7 @@ class CoachingRetriever:
             port=app_config.QDRANT_PORT,
             api_key=app_config.QDRANT_API_KEY,  # None in dev; required when set
             https=app_config.QDRANT_HTTPS,
+            timeout=60.0,                        # prevent write timeouts on remote cloud databases
             check_compatibility=False,  # silence client/server minor-version skew warning
         )
         return cls(client, RetrievalConfig())
