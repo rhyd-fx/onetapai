@@ -61,6 +61,8 @@ CREATE TABLE player_match_stats (
     bodyshot_pct    FLOAT           NULL,
     legshot_pct     FLOAT           NULL,
     won             BOOLEAN         NOT NULL,
+    tier_id         TINYINT UNSIGNED NULL,
+    tier_name       VARCHAR(20)     NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_match_player (match_id, puuid),
     INDEX idx_pms_puuid_time (puuid),
