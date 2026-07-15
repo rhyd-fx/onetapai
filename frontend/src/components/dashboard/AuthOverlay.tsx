@@ -91,7 +91,7 @@ export default function AuthOverlay() {
               Verify <span className="text-brand-red">Email</span>
             </h2>
             <p className="text-xs text-muted/80 mt-2 text-center max-w-[280px]">
-              We sent a 6-digit code to <strong className="text-white">{email}</strong>. Check your inbox or server logs.
+              We sent a 6-digit code to <strong className="text-white">{email}</strong>. Check your inbox.
             </p>
           </div>
 
