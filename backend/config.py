@@ -96,6 +96,9 @@ QDRANT_HTTPS = get("QDRANT_HTTPS", "false").lower() == "true"
 
 # --- Cache / queue (Redis) ---
 REDIS_URL = get("REDIS_URL", "redis://localhost:6379/0")
+# Optional. Used when REDIS_URL doesn't embed the password (redis://:pass@host).
+# Must match the requirepass the redis container was started with.
+REDIS_PASSWORD = get("REDIS_PASSWORD") or None
 
 # --- API server ---
 CORS_ORIGINS = [

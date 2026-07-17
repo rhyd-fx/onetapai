@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# --- Runtime caches ---
+backend/api/disposable_domains_cache.json
+
 # --- Python ---
 __pycache__/
 *.py[cod]

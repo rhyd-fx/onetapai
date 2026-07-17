@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { loginUser, registerUser, verifyRegisterUser, verifyUserSession, AuthResponse } from '@/lib/api';
+import { loginUser, registerUser, verifyRegisterUser, verifyUserSession, AuthResponse, RegisterResponse } from '@/lib/api';
 
 interface UserProfile {
   user_id: number;
@@ -15,7 +15,7 @@ interface AuthContextType {
   isLoggedIn: boolean;
   authLoading: boolean;
   login: (usernameOrEmail: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<any>;
+  register: (username: string, email: string, password: string) => Promise<RegisterResponse>;
   verifyRegister: (email: string, code: string) => Promise<void>;
   logout: () => void;
   refreshSession: () => Promise<void>;

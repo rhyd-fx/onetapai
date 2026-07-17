@@ -45,20 +45,34 @@ from rag.prompt_builder import build_coaching_prompt
 from rag import llm
 import redis
 import json
-import random
+import re
+import time
+import hmac
+import asyncio
+import secrets
 import smtplib
+import urllib.parse
+import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any
 
-# Initialize Redis client.
+# Initialize Redis client. REDIS_PASSWORD (if set) supplies the auth password
+# when REDIS_URL doesn't embed one; connection is lazy, so failures surface
+# per-command and fall back to the in-memory cache below.
 try:
-    redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
+    _redis_kwargs: Dict[str, Any] = {"decode_responses": True}
+    if config.REDIS_PASSWORD:
+        _redis_kwargs["password"] = config.REDIS_PASSWORD
+    redis_client = redis.from_url(config.REDIS_URL, **_redis_kwargs)
 except Exception as e:
     print(f"Failed to connect to Redis: {e}")
     redis_client = None
 
-_memory_cache: Dict[str, Dict[str, Any]] = {}
+# In-memory fallback when Redis is unavailable: key -> (expires_at, value).
+# NOTE: per-process — with multiple workers and no Redis, verify requests may
+# land on a worker that never saw the register request.
+_memory_cache: Dict[str, tuple[float, str]] = {}
 
 def get_cache_value(key: str) -> str | None:
     if redis_client:
@@ -66,7 +80,14 @@ def get_cache_value(key: str) -> str | None:
             return redis_client.get(key)
         except Exception:
             pass
-    return json.dumps(_memory_cache.get(key)) if key in _memory_cache else None
+    entry = _memory_cache.get(key)
+    if not entry:
+        return None
+    expires_at, value = entry
+    if time.time() >= expires_at:
+        _memory_cache.pop(key, None)
+        return None
+    return value
 
 def set_cache_value(key: str, value: str, ttl: int) -> None:
     if redis_client:
@@ -75,7 +96,11 @@ def set_cache_value(key: str, value: str, ttl: int) -> None:
             return
         except Exception:
             pass
-    _memory_cache[key] = json.loads(value)
+    # Evict expired entries so the fallback dict can't grow unboundedly.
+    now = time.time()
+    for k in [k for k, (exp, _) in _memory_cache.items() if now >= exp]:
+        _memory_cache.pop(k, None)
+    _memory_cache[key] = (now + ttl, value)
 
 def delete_cache_value(key: str) -> None:
     if redis_client:
@@ -85,6 +110,11 @@ def delete_cache_value(key: str) -> None:
         except Exception:
             pass
     _memory_cache.pop(key, None)
+
+# Simple format check; also blocks whitespace/newlines (SMTP header injection).
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+VERIFY_TTL_SECONDS = 900
+MAX_VERIFY_ATTEMPTS = 5
 
 def _send_verification_email(email: str, code: str) -> None:
     subject = "Verify your OneTap AI account"
@@ -101,18 +131,18 @@ def _send_verification_email(email: str, code: str) -> None:
     </div>
     """
     
-    # Always print clearly to the console logs
-    print(f"\n==================================================")
-    print(f"[EMAIL VERIFICATION] To: {email} | Code: {code}")
-    print(f"==================================================\n")
-    
     smtp_host = os.getenv("SMTP_HOST")
     smtp_port = os.getenv("SMTP_PORT")
     smtp_user = os.getenv("SMTP_USER")
     smtp_password = os.getenv("SMTP_PASSWORD")
     smtp_from = os.getenv("SMTP_FROM", smtp_user)
-    
+
     if not (smtp_host and smtp_port and smtp_user and smtp_password):
+        # Dev-only fallback: no SMTP configured, so surface the code in the
+        # console. Never log codes when real emails are being sent.
+        print(f"\n==================================================")
+        print(f"[EMAIL VERIFICATION] To: {email} | Code: {code}")
+        print(f"==================================================\n")
         return
         
     try:
@@ -150,9 +180,7 @@ DISPOSABLE_DOMAINS = set([
 
 def _fetch_disposable_domains_task():
     global DISPOSABLE_DOMAINS
-    import urllib.request
-    import time
-    
+
     cache_path = os.path.join(os.path.dirname(__file__), "disposable_domains_cache.json")
     
     # 1. Load from local cache file first
@@ -165,8 +193,9 @@ def _fetch_disposable_domains_task():
     except Exception as e:
         print(f"Error loading local disposable domains cache file: {e}")
 
-    # 2. Fetch from GitHub and save to cache file, repeating every 24 hours
-    url = "https://raw.githubusercontent.com/kickbox/disposable-email-domains/master/list.json"
+    # 2. Fetch from GitHub and save to cache file, repeating every 24 hours.
+    # (The kickbox/disposable-email-domains repo is gone — 404s as of 2026-07.)
+    url = "https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains.json"
     while True:
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -183,19 +212,28 @@ def _fetch_disposable_domains_task():
         # Sleep for 24 hours
         time.sleep(86400)
 
-def _check_kickbox_api(domain: str) -> bool:
-    """Query the Kickbox Open API for real-time verification of new temporary domains."""
+# Domains the Kickbox API confirmed as NOT disposable: domain -> checked_at.
+# Without this every signup from a legit domain (gmail.com, ...) would hit the
+# API. Re-checked after 24h, matching the daily list refresh cadence.
+_kickbox_verified_ok: Dict[str, float] = {}
+_KICKBOX_NEGATIVE_TTL = 86400
+
+def _check_kickbox_api(domain: str) -> bool | None:
+    """Query the Kickbox Open API for real-time verification of new temporary domains.
+
+    Returns True/False on a definitive answer, None if the lookup failed
+    (so callers don't cache an error as "not disposable").
+    """
     try:
-        import urllib.parse
         safe_domain = urllib.parse.quote(domain)
         url = f"https://open.kickbox.com/v1/disposable/{safe_domain}"
         req = urllib.request.Request(url, headers={'User-Agent': 'OneTapAI/1.0'})
         with urllib.request.urlopen(req, timeout=3) as response:
             data = json.loads(response.read().decode())
-            return data.get("disposable", False)
+            return bool(data.get("disposable", False))
     except Exception as e:
         print(f"Kickbox API lookup failed for {domain}: {e}")
-        return False
+        return None
 
 def _is_disposable_email(email: str) -> bool:
     if "@" not in email:
@@ -216,18 +254,19 @@ def _is_disposable_email(email: str) -> bool:
             return True
             
     # 2. Live API fallback for brand-new domains not yet in the daily cached list
-    if _check_kickbox_api(domain):
+    checked_at = _kickbox_verified_ok.get(domain)
+    if checked_at and time.time() - checked_at < _KICKBOX_NEGATIVE_TTL:
+        return False
+
+    result = _check_kickbox_api(domain)
+    if result is True:
         # Cache it dynamically in memory so we don't hit the API again for this domain
         DISPOSABLE_DOMAINS.add(domain)
         return True
-        
-    return False
+    if result is False:
+        _kickbox_verified_ok[domain] = time.time()
 
-@app.on_event("startup")
-async def startup_event():
-    import threading
-    t = threading.Thread(target=_fetch_disposable_domains_task, daemon=True)
-    t.start()
+    return False
 
 # Lazily-built retriever (loads the embedding model + Qdrant client once).
 _retriever: CoachingRetriever | None = None
@@ -264,6 +303,14 @@ def _profile_for_prompt(summary: dict | None, aim: dict, telemetry: dict | None 
     return res
 
 app = FastAPI(title="OneTap AI", version="1.0.0")
+
+
+@app.on_event("startup")
+async def startup_event():
+    import threading
+    t = threading.Thread(target=_fetch_disposable_domains_task, daemon=True)
+    t.start()
+
 
 # Rate limiting (per client IP). Throttles credential brute-force on the auth
 # endpoints and abuse of the external-API-fanning analyze/coach endpoints.
@@ -518,18 +565,21 @@ async def auth_register(request: Request, req: RegisterRequest):
     username = req.username.strip()
     email = req.email.strip().lower()
     password = req.password
-    
-    if _is_disposable_email(email):
-        raise HTTPException(
-            status_code=400,
-            detail="Disposable or temporary email addresses are not allowed. Please use a valid, permanent email address."
-        )
-        
+
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
     if len(username) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
     if len(password) < 12:
         raise HTTPException(status_code=400, detail="Password must be at least 12 characters.")
-        
+
+    # May hit the Kickbox API (network) — run off the event loop.
+    if await asyncio.to_thread(_is_disposable_email, email):
+        raise HTTPException(
+            status_code=400,
+            detail="Disposable or temporary email addresses are not allowed. Please use a valid, permanent email address."
+        )
+
     conn = _connect()
     try:
         with conn.cursor() as cur:
@@ -540,22 +590,24 @@ async def auth_register(request: Request, req: RegisterRequest):
         conn.close()
         
     pwd_hash = hash_password(password)
-    
-    # Generate 6-digit numeric verification code
-    code = f"{random.randint(100000, 999999)}"
-    
+
+    # Generate 6-digit numeric verification code (CSPRNG; leading zeros allowed)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+
     # Store registration details in cache for 15 minutes
     reg_data = {
         "username": username,
         "email": email,
         "password_hash": pwd_hash,
-        "code": code
+        "code": code,
+        "attempts": 0,
+        "created_at": time.time(),
     }
-    
-    set_cache_value(f"verify_reg:{email}", json.dumps(reg_data), 900)
-    
-    # Send verification email asynchronously / best-effort
-    _send_verification_email(email, code)
+
+    set_cache_value(f"verify_reg:{email}", json.dumps(reg_data), VERIFY_TTL_SECONDS)
+
+    # Send verification email best-effort, off the event loop (blocking SMTP I/O)
+    await asyncio.to_thread(_send_verification_email, email, code)
     
     return {
         "status": "verification_sent",
@@ -575,9 +627,20 @@ async def auth_verify(request: Request, req: VerifyRegisterRequest):
         raise HTTPException(status_code=400, detail="Verification code expired or not found. Please sign up again.")
         
     reg_data = json.loads(cached_data_str)
-    if reg_data.get("code") != code:
+
+    attempts = int(reg_data.get("attempts", 0))
+    if attempts >= MAX_VERIFY_ATTEMPTS:
+        delete_cache_value(f"verify_reg:{email}")
+        raise HTTPException(status_code=400, detail="Too many incorrect attempts. Please sign up again.")
+
+    if not hmac.compare_digest(str(reg_data.get("code", "")), code):
+        # Burn an attempt without extending the code's original 15-minute window.
+        reg_data["attempts"] = attempts + 1
+        elapsed = time.time() - float(reg_data.get("created_at", time.time()))
+        remaining_ttl = max(1, int(VERIFY_TTL_SECONDS - elapsed))
+        set_cache_value(f"verify_reg:{email}", json.dumps(reg_data), remaining_ttl)
         raise HTTPException(status_code=400, detail="Invalid verification code.")
-        
+
     username = reg_data["username"]
     pwd_hash = reg_data["password_hash"]
     
@@ -594,19 +657,16 @@ async def auth_verify(request: Request, req: VerifyRegisterRequest):
                 (username, email, pwd_hash)
             )
             conn.commit()
-            
-            # Get user ID
-            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-            user = cur.fetchone()
+            user_id = cur.lastrowid
     finally:
         conn.close()
-        
+
     # Delete from cache
     delete_cache_value(f"verify_reg:{email}")
-    
+
     # Generate JWT token directly so they are immediately logged in
     token = generate_jwt({
-        "user_id": user["id"],
+        "user_id": user_id,
         "username": username,
         "email": email
     })

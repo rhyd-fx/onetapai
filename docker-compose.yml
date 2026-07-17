@@ -48,7 +48,9 @@ services:
     # requirepass empty = no password (dev). Set REDIS_PASSWORD to enforce auth.
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-}"]
     ports:
-      - "127.0.0.1:6379:6379"
+      # Host port is configurable so machines with an existing redis-server on
+      # 6379 can use e.g. REDIS_HOST_PORT=6380 (keep REDIS_URL in sync).
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     deploy:
