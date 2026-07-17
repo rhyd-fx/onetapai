@@ -55,6 +55,7 @@ import urllib.parse
 import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 from typing import Dict, Any
 
 # Initialize Redis client. REDIS_PASSWORD (if set) supplies the auth password
@@ -117,19 +118,108 @@ VERIFY_TTL_SECONDS = 900
 MAX_VERIFY_ATTEMPTS = 5
 
 def _send_verification_email(email: str, code: str) -> None:
-    subject = "Verify your OneTap AI account"
-    body = f"""
-    <div style="font-family: Arial, sans-serif; background-color: #0c0f12; color: #f0f4f8; padding: 30px; border-radius: 8px; max-width: 600px; margin: 0 auto; border: 1px solid #1a222a;">
-        <h2 style="color: #ff4655; border-bottom: 2px solid #ff4655; padding-bottom: 10px; margin-top: 0;">Welcome to OneTap AI!</h2>
-        <p style="font-size: 16px; line-height: 1.5; color: #a0aab5;">Please use the following 6-digit verification code to activate your account:</p>
-        <div style="background-color: #161c22; border: 1px solid #ff4655; border-radius: 6px; padding: 15px; text-align: center; margin: 25px 0;">
-            <span style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #ff4655;">{code}</span>
-        </div>
-        <p style="font-size: 14px; color: #6d7a86; line-height: 1.5;">This code will expire in 15 minutes. If you did not request this, you can safely ignore this email.</p>
-        <hr style="border: 0; border-top: 1px solid #1c2630; margin: 30px 0;" />
-        <p style="font-size: 11px; text-align: center; color: #52606d;">OneTap AI Coaching Platform &copy; 2026</p>
-    </div>
-    """
+    subject = "Your OneTap AI verification code"
+    # Colors mirror the site theme in frontend/src/app/globals.css:
+    # ink-900 #05070b, ink-700 #0f1720, line #1e2a38, brand-red #ff4655, muted #8b9bb0.
+    # Table layout + inline styles only — divs/flex/external CSS break in Gmail/Outlook.
+    text_body = f"""ONETAP AI — EMAIL VERIFICATION
+
+Your verification code: {code}
+
+Enter this code on the verification screen to activate your account.
+The code expires in 15 minutes.
+
+Didn't create an account? You can safely ignore this email — no account
+is created without this code.
+
+(c) 2026 OneTap AI — Valorant Coaching Platform
+"""
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<body style="margin:0;padding:0;background-color:#05070b;">
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">Your OneTap AI verification code is {code} — it expires in 15 minutes.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#05070b;">
+    <tr>
+      <td align="center" style="padding:40px 12px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;">
+
+          <!-- Wordmark -->
+          <tr>
+            <td align="center" style="padding:0 24px 22px;">
+              <span style="font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:900;letter-spacing:4px;text-transform:uppercase;color:#ffffff;">ONETAP<span style="color:#ff4655;">AI</span></span>
+            </td>
+          </tr>
+
+          <!-- Card -->
+          <tr>
+            <td>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#0f1720;border:1px solid #1e2a38;border-radius:16px;">
+                <!-- Red accent bar -->
+                <tr>
+                  <td style="height:3px;line-height:3px;font-size:0;background-color:#ff4655;border-radius:16px 16px 0 0;">&nbsp;</td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:38px 40px 0;">
+                    <span style="font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;letter-spacing:5px;text-transform:uppercase;color:#8b9bb0;">Email Verification</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:12px 40px 0;">
+                    <span style="font-family:Arial,Helvetica,sans-serif;font-size:26px;font-weight:900;color:#ffffff;">Activate your account</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:14px 48px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:22px;color:#8b9bb0;">
+                    Enter this code on the verification screen to finish creating your tactical account.
+                  </td>
+                </tr>
+                <!-- Code box -->
+                <tr>
+                  <td align="center" style="padding:30px 40px 8px;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td align="center" style="background-color:#05070b;border:1px solid #ff4655;border-radius:12px;padding:20px 30px 20px 40px;">
+                          <span style="font-family:'Courier New',Courier,monospace;font-size:36px;font-weight:bold;letter-spacing:10px;color:#ff4655;">{code}</span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:10px 40px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#8b9bb0;">
+                    This code expires in <span style="color:#ffffff;font-weight:bold;">15 minutes</span>.
+                  </td>
+                </tr>
+                <!-- Divider -->
+                <tr>
+                  <td style="padding:30px 40px 0;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                      <tr><td style="height:1px;line-height:1px;font-size:0;background-color:#1e2a38;">&nbsp;</td></tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td align="center" style="padding:18px 48px 36px;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#5d6b7e;">
+                    Didn't create an account? You can safely ignore this email &mdash; no account is created without this code.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="padding:24px 24px 0;font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:17px;color:#5d6b7e;">
+              OneTap AI &mdash; Valorant Coaching Platform<br/>&copy; 2026 OneTap AI
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
     
     smtp_host = os.getenv("SMTP_HOST")
     smtp_port = os.getenv("SMTP_PORT")
@@ -146,10 +236,13 @@ def _send_verification_email(email: str, code: str) -> None:
         return
         
     try:
-        msg = MIMEMultipart()
-        msg["From"] = smtp_from
+        # "alternative" so clients render HTML but fall back to the text part
+        # (also improves spam scoring vs HTML-only mail).
+        msg = MIMEMultipart("alternative")
+        msg["From"] = formataddr(("OneTap AI", smtp_from))
         msg["To"] = email
         msg["Subject"] = subject
+        msg.attach(MIMEText(text_body, "plain"))
         msg.attach(MIMEText(body, "html"))
         
         port = int(smtp_port)
