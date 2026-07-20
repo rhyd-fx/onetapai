@@ -13,7 +13,7 @@ interface Msg {
   rated?: 1 | -1;
 }
 
-export default function CoachPanel({ riotId }: { riotId?: string }) {
+export default function CoachPanel({ riotId, region }: { riotId?: string; region?: string }) {
   const [messages, setMessages] = useState<Msg[]>([
     {
       role: 'ai',
@@ -38,7 +38,7 @@ export default function CoachPanel({ riotId }: { riotId?: string }) {
     setMessages((m) => [...m, { role: 'user', content: q }]);
     setLoading(true);
     try {
-      const res = await askCoach(riotId ?? '', q);
+      const res = await askCoach(riotId ?? '', q, region ?? 'na');
       setMessages((m) => [...m, { role: 'ai', content: res.answer, sources: res.sources_used, question: q }]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Request failed';

@@ -126,6 +126,25 @@ def build_coaching_prompt(
 - **Session ACS Trend**: {player_profile.get('acs_slope', 'stable')}
 """
 
+    patterns = player_profile.get("round_patterns")
+    if patterns:
+        def _pct(v):
+            return f"{v:.1f}%" if v is not None else "no data"
+
+        pistol = patterns.get("pistol", {})
+        post = patterns.get("post_pistol", {})
+        momentum = patterns.get("momentum", {})
+        atk = patterns.get("sides", {}).get("attack", {})
+        dfn = patterns.get("sides", {}).get("defense", {})
+        player_context += f"""
+## Round Patterns (last {patterns.get('matches_covered', 0)} matches, {patterns.get('total_rounds', 0)} rounds)
+- **Pistol rounds**: {_pct(pistol.get('win_pct'))} win rate over {pistol.get('rounds', 0)} pistols ({pistol.get('avg_kills', 0)} K / {pistol.get('avg_deaths', 0)} D per pistol)
+- **Round after winning pistol**: {_pct(post.get('after_win_pct'))} | **after losing pistol**: {_pct(post.get('after_loss_pct'))}
+- **Momentum**: {_pct(momentum.get('after_won_round_pct'))} win rate after a won round vs {_pct(momentum.get('after_lost_round_pct'))} after a lost round
+- **Attack**: {_pct(atk.get('win_pct'))} WR, {_pct(atk.get('early_death_pct'))} early-death rate, opening duels {_pct(atk.get('opening_duel_win_pct'))} ({atk.get('opening_duel_attempts', 0)} taken)
+- **Defense**: {_pct(dfn.get('win_pct'))} WR, {_pct(dfn.get('early_death_pct'))} early-death rate, opening duels {_pct(dfn.get('opening_duel_win_pct'))} ({dfn.get('opening_duel_attempts', 0)} taken)
+"""
+
     if match_context and match_context.get("rounds"):
         player_context += _format_match_context(
             match_context.get("match", {}), match_context["rounds"]

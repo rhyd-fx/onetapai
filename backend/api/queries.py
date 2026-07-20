@@ -999,3 +999,153 @@ def get_match_rounds(conn, match_id: str, puuid: str) -> list[dict]:
             }
         )
     return out
+
+
+def get_round_patterns(
+    conn,
+    puuid: str,
+    match_limit: int = 20,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> dict | None:
+    """Cross-match round-level patterns over the player's recent matches.
+
+    Answers "do I always lose pistols?"-style questions: pistol record and
+    conversion, bounce-back vs momentum win rates, early deaths and opening
+    duels split by side. Returns None when no round data exists.
+    """
+    filter_str, params = _match_filters(game_modes, None)
+
+    with conn.cursor() as cur:
+        # Per-round rows for the player's most recent N matches, ordered so
+        # momentum/conversion can be computed by walking each match.
+        cur.execute(
+            f"""
+            SELECT r.id AS round_id, r.match_id, r.round_num, r.winning_team,
+                   prs.team_id, prs.deaths, prs.kills, prs.economy_loadout_value
+            FROM player_round_stats prs
+            JOIN rounds r ON prs.round_id = r.id
+            JOIN (
+                SELECT m.match_id, m.started_at
+                FROM player_match_stats pms
+                JOIN matches m ON pms.match_id = m.match_id
+                WHERE pms.puuid = %s {filter_str}
+                ORDER BY m.started_at DESC
+                LIMIT %s
+            ) recent ON recent.match_id = r.match_id
+            WHERE prs.puuid = %s
+            ORDER BY recent.started_at, r.match_id, r.round_num
+            """,
+            [puuid] + params + [int(match_limit), puuid],
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+
+        round_ids = [r["round_id"] for r in rows]
+        placeholders = ",".join(["%s"] * len(round_ids))
+        cur.execute(
+            f"""
+            SELECT round_id, killer_puuid, victim_puuid, time_in_round_ms,
+                   is_opening_kill
+            FROM kill_events
+            WHERE round_id IN ({placeholders})
+              AND (killer_puuid = %s OR victim_puuid = %s)
+            """,
+            round_ids + [puuid, puuid],
+        )
+        events = cur.fetchall()
+
+    early_death_rounds: set[int] = set()
+    opening: dict[int, bool] = {}  # round_id -> player won the opening duel
+    for e in events:
+        if e["victim_puuid"] == puuid and int(e["time_in_round_ms"]) < 15000:
+            early_death_rounds.add(e["round_id"])
+        if e["is_opening_kill"]:
+            opening[e["round_id"]] = e["killer_puuid"] == puuid
+
+    def _bucket():
+        return {"rounds": 0, "wins": 0}
+
+    pistol = _bucket()
+    pistol_kills = 0
+    pistol_deaths = 0
+    post_pistol_win = _bucket()   # round right after a won pistol
+    post_pistol_loss = _bucket()  # round right after a lost pistol
+    after_win = _bucket()         # momentum: round after any won round
+    after_loss = _bucket()        # bounce-back: round after any lost round
+    sides = {
+        "attack": {"rounds": 0, "wins": 0, "early_deaths": 0, "od_attempts": 0, "od_wins": 0},
+        "defense": {"rounds": 0, "wins": 0, "early_deaths": 0, "od_attempts": 0, "od_wins": 0},
+    }
+
+    prev_match = None
+    prev_won: bool | None = None
+    prev_was_pistol_won: bool | None = None
+    for r in rows:
+        if r["match_id"] != prev_match:
+            prev_match = r["match_id"]
+            prev_won = None
+            prev_was_pistol_won = None
+
+        num = int(r["round_num"])
+        won = r["winning_team"] == r["team_id"]
+        side = "attack" if _attacking(r["team_id"], num) else "defense"
+
+        s = sides[side]
+        s["rounds"] += 1
+        s["wins"] += won
+        s["early_deaths"] += r["round_id"] in early_death_rounds
+        if r["round_id"] in opening:
+            s["od_attempts"] += 1
+            s["od_wins"] += opening[r["round_id"]]
+
+        if num in (0, 12):  # pistol rounds
+            pistol["rounds"] += 1
+            pistol["wins"] += won
+            pistol_kills += int(r["kills"] or 0)
+            pistol_deaths += int(r["deaths"] or 0)
+        elif prev_was_pistol_won is not None:
+            target = post_pistol_win if prev_was_pistol_won else post_pistol_loss
+            target["rounds"] += 1
+            target["wins"] += won
+
+        if prev_won is not None:
+            target = after_win if prev_won else after_loss
+            target["rounds"] += 1
+            target["wins"] += won
+
+        prev_was_pistol_won = won if num in (0, 12) else None
+        prev_won = won
+
+    def _wr(b):
+        return round(b["wins"] / b["rounds"] * 100, 1) if b["rounds"] else None
+
+    matches_covered = len({r["match_id"] for r in rows})
+    return {
+        "matches_covered": matches_covered,
+        "total_rounds": len(rows),
+        "pistol": {
+            "rounds": pistol["rounds"],
+            "win_pct": _wr(pistol),
+            "avg_kills": round(pistol_kills / pistol["rounds"], 2) if pistol["rounds"] else 0,
+            "avg_deaths": round(pistol_deaths / pistol["rounds"], 2) if pistol["rounds"] else 0,
+        },
+        "post_pistol": {
+            "after_win_pct": _wr(post_pistol_win),
+            "after_loss_pct": _wr(post_pistol_loss),
+        },
+        "momentum": {
+            "after_won_round_pct": _wr(after_win),
+            "after_lost_round_pct": _wr(after_loss),
+        },
+        "sides": {
+            side: {
+                "win_pct": _wr({"rounds": s["rounds"], "wins": s["wins"]}),
+                "rounds": s["rounds"],
+                "early_death_pct": round(s["early_deaths"] / s["rounds"] * 100, 1) if s["rounds"] else None,
+                "opening_duel_attempts": s["od_attempts"],
+                "opening_duel_win_pct": round(s["od_wins"] / s["od_attempts"] * 100, 1) if s["od_attempts"] else None,
+            }
+            for side, s in sides.items()
+        },
+    }

@@ -234,11 +234,11 @@ export interface CoachResponse {
   follow_up_suggestions: string[];
 }
 
-export async function askCoach(riotId: string, question: string): Promise<CoachResponse> {
+export async function askCoach(riotId: string, question: string, region = "na"): Promise<CoachResponse> {
   const res = await fetch(`${API_BASE}/api/v1/coach`, {
     method: "POST",
     headers: getHeaders(),
-    body: JSON.stringify({ riot_id: riotId, question }),
+    body: JSON.stringify({ riot_id: riotId, question, region }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

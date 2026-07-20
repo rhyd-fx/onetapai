@@ -40,6 +40,7 @@ from api.queries import (
     get_economy_split,
     find_recent_match,
     get_match_rounds,
+    get_round_patterns,
 )
 from api.auth_utils import hash_password, verify_password, generate_jwt, verify_jwt
 from rag.retriever import CoachingRetriever
@@ -528,6 +529,7 @@ class AnalysisRequest(BaseModel):
 class CoachingQuestion(BaseModel):
     riot_id: str
     question: str
+    region: str = "na"  # used when the player must be synced from Henrik first
     context_match_ids: list[str] | None = None
 
 
@@ -1047,6 +1049,11 @@ _VALORANT_MAPS = {
     "glitch", "kasbah", "piazza",
 }
 
+# Modes with standard 12-round halves — the only ones where round-by-round
+# analysis (pistols, sides, economy) is meaningful. Deathmatch stores 1 round
+# per match and Swiftplay's 4-round halves break the side convention.
+_STANDARD_MODES = ("Competitive", "Premier", "Unrated")
+
 # Phrases that mean "the player is asking about a specific recent game"
 # even without naming a map.
 _RECENT_MATCH_HINTS = (
@@ -1068,7 +1075,7 @@ def _resolve_match_context(conn, puuid: str, question: str) -> dict | None:
     if not map_name and not any(h in question.lower() for h in _RECENT_MATCH_HINTS):
         return None
 
-    match = find_recent_match(conn, puuid, map_name=map_name, game_modes=None)
+    match = find_recent_match(conn, puuid, map_name=map_name, game_modes=_STANDARD_MODES)
     if not match:
         return None
     rounds = get_match_rounds(conn, match["match_id"], puuid)
@@ -1087,11 +1094,29 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
     profile: dict = {}
     match_context: dict | None = None
     if "#" in req.riot_id:
+        name, tag = (p.strip() for p in req.riot_id.rsplit("#", 1))
+
+        # New/returning players: if we've never ingested them (or they have no
+        # matches yet), pull their recent matches from Henrik first — the coach
+        # must work on first contact, not only for already-analyzed players.
         try:
             conn = get_db_connection()
             try:
-                name, tag = req.riot_id.rsplit("#", 1)
-                puuid = resolve_puuid(conn, name.strip(), tag.strip())
+                puuid = resolve_puuid(conn, name, tag)
+                needs_sync = puuid is None or find_recent_match(conn, puuid, game_modes=_STANDARD_MODES) is None
+            finally:
+                conn.close()
+            if needs_sync:
+                sync = await _sync_from_henrik(name, tag, req.region, size=10)
+                if sync.get("error"):
+                    print(f"Coach on-demand sync for {req.riot_id}: {sync['error']}")
+        except Exception as e:  # noqa: BLE001 — coach still answers without sync
+            print(f"Coach on-demand sync failed for {req.riot_id}: {e}")
+
+        try:
+            conn = get_db_connection()
+            try:
+                puuid = resolve_puuid(conn, name, tag)
                 if puuid:
                     summary = get_player_summary(conn, puuid)
                     telemetry = get_telemetry(conn, puuid)
@@ -1099,6 +1124,9 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
                     aim_dist = get_aim_by_distance(conn, puuid)
                     aim_prof = _build_aim_profile(summary, telemetry, aim_dist)
                     profile = _profile_for_prompt(summary, aim_prof, telemetry, matchup)
+                    patterns = get_round_patterns(conn, puuid, game_modes=_STANDARD_MODES)
+                    if patterns:
+                        profile["round_patterns"] = patterns
                     match_context = _resolve_match_context(conn, puuid, req.question)
             finally:
                 conn.close()

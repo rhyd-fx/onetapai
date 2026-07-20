@@ -611,7 +611,7 @@ export default function Dashboard() {
               <SectionTitle>Live Coach · RAG</SectionTitle>
               <div className="min-h-[20rem] flex-1">
                 {/* key resets the chat (greeting + history) when the player changes */}
-                <CoachPanel key={vm.riotId} riotId={vm.riotId} />
+                <CoachPanel key={vm.riotId} riotId={vm.riotId} region={region} />
               </div>
             </Panel>
             <Panel glow="blue" className="flex flex-col p-5">
