@@ -38,6 +38,8 @@ from api.queries import (
     get_player_seasons,
     get_matchup_diagnostics,
     get_economy_split,
+    find_recent_match,
+    get_match_rounds,
 )
 from api.auth_utils import hash_password, verify_password, generate_jwt, verify_jwt
 from rag.retriever import CoachingRetriever
@@ -1037,6 +1039,44 @@ async def acs_trajectory(riot_id: str, last_n: int = 20, user: dict = Depends(ge
 
 # --- Not yet wired (stubs kept so the contract is visible) ---
 
+# Known map names for match-scoped question detection (standings + TDM maps
+# seen in Henrik data). Lowercase; compared word-wise against the question.
+_VALORANT_MAPS = {
+    "ascent", "bind", "breeze", "fracture", "haven", "icebox", "lotus",
+    "pearl", "split", "sunset", "abyss", "corrode", "district", "drift",
+    "glitch", "kasbah", "piazza",
+}
+
+# Phrases that mean "the player is asking about a specific recent game"
+# even without naming a map.
+_RECENT_MATCH_HINTS = (
+    "last match", "last game", "latest match", "latest game", "previous match",
+    "previous game", "recent match", "recent game", "my match", "that match",
+    "that game", "this match", "this game", "yesterday",
+)
+
+
+def _resolve_match_context(conn, puuid: str, question: str) -> dict | None:
+    """If the question targets a specific match, fetch its round-by-round data.
+
+    "my last match on lotus" -> newest Lotus match; "my last game" -> newest
+    match on any map. Returns {"match": ..., "rounds": ...} or None.
+    """
+    q_words = set(re.findall(r"[a-z]+", question.lower()))
+    map_name = next((m for m in _VALORANT_MAPS if m in q_words), None)
+
+    if not map_name and not any(h in question.lower() for h in _RECENT_MATCH_HINTS):
+        return None
+
+    match = find_recent_match(conn, puuid, map_name=map_name, game_modes=None)
+    if not match:
+        return None
+    rounds = get_match_rounds(conn, match["match_id"], puuid)
+    if not rounds:
+        return None
+    return {"match": match, "rounds": rounds}
+
+
 @app.post("/api/v1/coach", response_model=CoachingResponse)
 @limiter.limit("15/minute")
 async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = Depends(get_current_user)):
@@ -1045,6 +1085,7 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
     # Player context is optional — a general question still works. DB failure
     # here is non-fatal; we just answer without personalized stats.
     profile: dict = {}
+    match_context: dict | None = None
     if "#" in req.riot_id:
         try:
             conn = get_db_connection()
@@ -1058,6 +1099,7 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
                     aim_dist = get_aim_by_distance(conn, puuid)
                     aim_prof = _build_aim_profile(summary, telemetry, aim_dist)
                     profile = _profile_for_prompt(summary, aim_prof, telemetry, matchup)
+                    match_context = _resolve_match_context(conn, puuid, req.question)
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 — proceed without player context
@@ -1074,10 +1116,12 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
         profile,
         [{"content": c.content, "source": c.source, "metadata": c.metadata} for c in chunks],
         req.question,
+        match_context=match_context,
     )
 
     try:
-        answer = llm.generate_coaching_response(messages)
+        # Off the event loop — OpenRouter generation blocks for seconds.
+        answer = await asyncio.to_thread(llm.generate_coaching_response, messages)
     except Exception as e:  # noqa: BLE001
         print(f"LLM generation failed: {e}")
         raise HTTPException(status_code=502, detail="The coach is temporarily unavailable. Please try again.")

@@ -835,3 +835,167 @@ def get_economy_split(conn, puuid: str, season_id: str | None = None, game_modes
 
 
 
+
+
+def find_recent_match(
+    conn,
+    puuid: str,
+    map_name: str | None = None,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> dict | None:
+    """Most recent match the player appears in, optionally filtered by map.
+
+    map_name matches matches.map_id case-insensitively ("lotus" -> "Lotus").
+    """
+    map_clause = "AND LOWER(m.map_id) = LOWER(%s)" if map_name else ""
+    filter_str, params = _match_filters(game_modes, None)
+    sql_params = [puuid] + ([map_name] if map_name else []) + params
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT pms.match_id, m.map_id, m.started_at, m.rounds_played,
+                   pms.team_id, pms.agent_id, pms.acs, pms.won,
+                   pms.total_kills, pms.total_deaths, pms.total_assists,
+                   pms.headshot_pct, pms.tier_name,
+                   (SELECT COUNT(*) FROM rounds r WHERE r.match_id = m.match_id AND r.winning_team = pms.team_id) AS team_score,
+                   (SELECT COUNT(*) FROM rounds r WHERE r.match_id = m.match_id AND r.winning_team != pms.team_id) AS enemy_score
+            FROM player_match_stats pms
+            JOIN matches m ON pms.match_id = m.match_id
+            WHERE pms.puuid = %s {map_clause} {filter_str}
+            ORDER BY m.started_at DESC
+            LIMIT 1
+            """,
+            sql_params,
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+
+    started = row["started_at"]
+    return {
+        "match_id": row["match_id"],
+        "map": row["map_id"],
+        "started_at": started.isoformat() if isinstance(started, datetime) else started,
+        "agent": row["agent_id"],
+        "team": row["team_id"],
+        "won": bool(row["won"]),
+        "team_score": int(row["team_score"] or 0),
+        "enemy_score": int(row["enemy_score"] or 0),
+        "acs": round(_f(row["acs"]) or 0, 1),
+        "kills": int(row["total_kills"] or 0),
+        "deaths": int(row["total_deaths"] or 0),
+        "assists": int(row["total_assists"] or 0),
+        "headshot_pct": round((_f(row["headshot_pct"]) or 0) * 100, 1),
+        "tier_name": row["tier_name"] or "Unranked",
+    }
+
+
+def _attacking(team: str, round_num: int) -> bool:
+    # Same side convention as get_side_bias: Red attacks rounds 0-11,
+    # Blue rounds 12-23, overtime alternates starting with Red on even.
+    if round_num < 12:
+        return team == "Red"
+    if round_num < 24:
+        return team == "Blue"
+    return (team == "Red") if (round_num % 2 == 0) else (team == "Blue")
+
+
+def get_match_rounds(conn, match_id: str, puuid: str) -> list[dict]:
+    """Round-by-round view of one match from the player's perspective.
+
+    Feeds the coach LLM prompt: per round — result, side, player K/D/A,
+    damage, loadout economy class, opening duel involvement, plant/defuse.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id AS round_id, r.round_num, r.round_result, r.winning_team,
+                   r.bomb_planter, r.bomb_defuser,
+                   prs.team_id, prs.kills, prs.deaths, prs.assists,
+                   prs.damage_dealt, prs.damage_received,
+                   prs.economy_loadout_value, prs.economy_spent, prs.was_afk
+            FROM rounds r
+            JOIN player_round_stats prs ON prs.round_id = r.id AND prs.puuid = %s
+            WHERE r.match_id = %s
+            ORDER BY r.round_num
+            """,
+            (puuid, match_id),
+        )
+        rounds = cur.fetchall()
+        if not rounds:
+            return []
+
+        round_ids = [r["round_id"] for r in rounds]
+        placeholders = ",".join(["%s"] * len(round_ids))
+        cur.execute(
+            f"""
+            SELECT round_id, killer_puuid, victim_puuid, weapon,
+                   finishing_damage_type, time_in_round_ms, is_opening_kill
+            FROM kill_events
+            WHERE round_id IN ({placeholders})
+              AND (killer_puuid = %s OR victim_puuid = %s)
+            ORDER BY round_id, time_in_round_ms
+            """,
+            round_ids + [puuid, puuid],
+        )
+        events = cur.fetchall()
+
+    events_by_round: dict[int, list[dict]] = {}
+    for e in events:
+        events_by_round.setdefault(e["round_id"], []).append(e)
+
+    out = []
+    for r in rounds:
+        team = r["team_id"]
+        num = int(r["round_num"])
+        loadout = int(r["economy_loadout_value"] or 0)
+        # Buckets mirror v_round_economy_class in db/init.sql.
+        if loadout < 2000:
+            eco = "eco"
+        elif loadout < 3900:
+            eco = "half_buy"
+        elif loadout < 4500:
+            eco = "force_buy"
+        else:
+            eco = "full_buy"
+
+        opening = None
+        my_kills: list[dict] = []
+        death: dict | None = None
+        for e in events_by_round.get(r["round_id"], []):
+            is_kill = e["killer_puuid"] == puuid
+            if e["is_opening_kill"]:
+                opening = "won" if is_kill else "lost"
+            entry = {
+                "weapon": e["weapon"],
+                "headshot": e["finishing_damage_type"] == "headshot",
+                "at_sec": round(int(e["time_in_round_ms"]) / 1000, 1),
+            }
+            if is_kill:
+                my_kills.append(entry)
+            else:
+                death = entry
+
+        out.append(
+            {
+                "round": num + 1,  # 1-based for humans/LLM
+                "side": "attack" if _attacking(team, num) else "defense",
+                "won": r["winning_team"] == team,
+                "result": r["round_result"],
+                "kills": int(r["kills"] or 0),
+                "deaths": int(r["deaths"] or 0),
+                "assists": int(r["assists"] or 0),
+                "damage_dealt": int(r["damage_dealt"] or 0),
+                "damage_received": int(r["damage_received"] or 0),
+                "loadout_value": loadout,
+                "economy_class": eco,
+                "opening_duel": opening,
+                "kill_details": my_kills,
+                "death_detail": death,
+                "planted_bomb": r["bomb_planter"] == puuid,
+                "defused_bomb": r["bomb_defuser"] == puuid,
+                "was_afk": bool(r["was_afk"]),
+            }
+        )
+    return out
