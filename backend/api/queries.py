@@ -855,6 +855,7 @@ def find_recent_match(
         cur.execute(
             f"""
             SELECT pms.match_id, m.map_id, m.started_at, m.rounds_played,
+                   m.game_mode,
                    pms.team_id, pms.agent_id, pms.acs, pms.won,
                    pms.total_kills, pms.total_deaths, pms.total_assists,
                    pms.headshot_pct, pms.tier_name,
@@ -876,6 +877,7 @@ def find_recent_match(
     return {
         "match_id": row["match_id"],
         "map": row["map_id"],
+        "game_mode": row["game_mode"] or "Unknown",
         "started_at": started.isoformat() if isinstance(started, datetime) else started,
         "agent": row["agent_id"],
         "team": row["team_id"],
@@ -891,12 +893,13 @@ def find_recent_match(
     }
 
 
-def _attacking(team: str, round_num: int) -> bool:
-    # Same side convention as get_side_bias: Red attacks rounds 0-11,
-    # Blue rounds 12-23, overtime alternates starting with Red on even.
-    if round_num < 12:
+def _attacking(team: str, round_num: int, half_len: int = 12) -> bool:
+    # Same side convention as get_side_bias: Red attacks the first half,
+    # Blue the second half, overtime alternates. half_len is 12 for standard
+    # modes, 4 for Swiftplay.
+    if round_num < half_len:
         return team == "Red"
-    if round_num < 24:
+    if round_num < 2 * half_len:
         return team == "Blue"
     return (team == "Red") if (round_num % 2 == 0) else (team == "Blue")
 
@@ -908,6 +911,15 @@ def get_match_rounds(conn, match_id: str, puuid: str) -> list[dict]:
     damage, loadout economy class, opening duel involvement, plant/defuse.
     """
     with conn.cursor() as cur:
+        cur.execute("SELECT game_mode FROM matches WHERE match_id = %s", (match_id,))
+        mode_row = cur.fetchone()
+        game_mode = (mode_row or {}).get("game_mode") or ""
+        # Swiftplay swaps sides after 4 rounds; standard modes after 12. For
+        # other modes (Spike Rush etc.) the convention is unknown — side is
+        # omitted rather than guessed wrong.
+        half_len = {"Swiftplay": 4}.get(game_mode, 12)
+        side_known = game_mode in ("Competitive", "Premier", "Unrated", "Swiftplay", "Custom Game")
+
         cur.execute(
             """
             SELECT r.id AS round_id, r.round_num, r.round_result, r.winning_team,
@@ -980,7 +992,7 @@ def get_match_rounds(conn, match_id: str, puuid: str) -> list[dict]:
         out.append(
             {
                 "round": num + 1,  # 1-based for humans/LLM
-                "side": "attack" if _attacking(team, num) else "defense",
+                "side": ("attack" if _attacking(team, num, half_len) else "defense") if side_known else "?",
                 "won": r["winning_team"] == team,
                 "result": r["round_result"],
                 "kills": int(r["kills"] or 0),

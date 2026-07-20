@@ -1041,26 +1041,39 @@ async def acs_trajectory(riot_id: str, last_n: int = 20, user: dict = Depends(ge
 
 # --- Not yet wired (stubs kept so the contract is visible) ---
 
-# Known map names for match-scoped question detection (standings + TDM maps
-# seen in Henrik data). Lowercase; compared word-wise against the question.
-_VALORANT_MAPS = {
-    "ascent", "bind", "breeze", "fracture", "haven", "icebox", "lotus",
-    "pearl", "split", "sunset", "abyss", "corrode", "district", "drift",
-    "glitch", "kasbah", "piazza",
-}
-
 # Modes with standard 12-round halves — the only ones where round-by-round
 # analysis (pistols, sides, economy) is meaningful. Deathmatch stores 1 round
 # per match and Swiftplay's 4-round halves break the side convention.
 _STANDARD_MODES = ("Competitive", "Premier", "Unrated")
 
-# Phrases that mean "the player is asking about a specific recent game"
-# even without naming a map.
-_RECENT_MATCH_HINTS = (
-    "last match", "last game", "latest match", "latest game", "previous match",
-    "previous game", "recent match", "recent game", "my match", "that match",
-    "that game", "this match", "this game", "yesterday",
+# "last summit match", "previous ranked game", "my most recent match", ...
+_RECENT_MATCH_RE = re.compile(
+    r"\b(last|latest|previous|recent|earlier|final)\b(?:\s+\w+){0,3}\s+(match|game)\b"
 )
+
+# Phrases that mean "the player is asking about a specific recent game"
+# even without naming a map or using a recency adjective.
+_RECENT_MATCH_HINTS = (
+    "my match", "that match", "that game", "this match", "this game", "yesterday",
+)
+
+# Map pool learned from ingested data (lowercase -> canonical), refreshed
+# hourly. Hardcoding map names breaks whenever Riot ships a new map.
+_maps_cache: Dict[str, Any] = {"maps": {}, "at": 0.0}
+
+
+def _known_maps(conn) -> Dict[str, str]:
+    if not _maps_cache["maps"] or time.time() - _maps_cache["at"] > 3600:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT map_id FROM matches")
+                _maps_cache["maps"] = {
+                    r["map_id"].lower(): r["map_id"] for r in cur.fetchall() if r["map_id"]
+                }
+                _maps_cache["at"] = time.time()
+        except Exception as e:  # noqa: BLE001 — detection degrades, coach still answers
+            print(f"Failed to load map pool for coach detection: {e}")
+    return _maps_cache["maps"]
 
 
 def _resolve_match_context(conn, puuid: str, question: str) -> dict | None:
@@ -1069,18 +1082,25 @@ def _resolve_match_context(conn, puuid: str, question: str) -> dict | None:
     "my last match on lotus" -> newest Lotus match; "my last game" -> newest
     match on any map. Returns {"match": ..., "rounds": ...} or None.
     """
-    q_words = set(re.findall(r"[a-z]+", question.lower()))
-    map_name = next((m for m in _VALORANT_MAPS if m in q_words), None)
+    q = question.lower()
+    map_name = next(
+        (orig for low, orig in _known_maps(conn).items() if re.search(rf"\b{re.escape(low)}\b", q)),
+        None,
+    )
 
-    if not map_name and not any(h in question.lower() for h in _RECENT_MATCH_HINTS):
+    if not map_name and not _RECENT_MATCH_RE.search(q) and not any(h in q for h in _RECENT_MATCH_HINTS):
         return None
 
     match = find_recent_match(conn, puuid, map_name=map_name, game_modes=_STANDARD_MODES)
     if not match:
-        return None
-    rounds = get_match_rounds(conn, match["match_id"], puuid)
-    if not rounds:
-        return None
+        # The player's last game on this map may be Swiftplay/etc. — better to
+        # analyze that than to claim we have no data.
+        match = find_recent_match(conn, puuid, map_name=map_name, game_modes=None)
+    if not match or not (rounds := get_match_rounds(conn, match["match_id"], puuid)):
+        # Match-scoped question but nothing to show — tell the LLM explicitly
+        # so it says "no matches on X in your history" instead of asking the
+        # player for match IDs or logs.
+        return {"match": None, "rounds": [], "requested_map": map_name}
     return {"match": match, "rounds": rounds}
 
 

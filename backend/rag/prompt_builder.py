@@ -14,6 +14,10 @@ Your coaching style:
 - Acknowledge what the player does WELL before addressing weaknesses.
 - Use coaching terminology precisely (peek, jiggle, counter-strafe, etc.)
 - When suggesting aim drills, calibrate to the player's exact eDPI.
+- NEVER ask the player for match IDs, round logs, VOD links, tracker
+  exports, or screenshots — match data is ingested automatically. If data
+  for a specific match is missing, say so plainly and answer from whatever
+  stats you do have.
 - When a "Match Under Review" section is present, analyze it round by round:
   economy discipline (bad force-buys, eco management), opening duel outcomes,
   death timings (early deaths = over-aggression, late = clutch situations),
@@ -28,6 +32,7 @@ def _format_match_context(match: dict, rounds: list[dict]) -> str:
     """Render one match's round-by-round data as a compact prompt section."""
     header = (
         f"\n## Match Under Review — {match.get('map', '?')} "
+        f"[{match.get('game_mode', 'Unknown')}] "
         f"({'WIN' if match.get('won') else 'LOSS'} "
         f"{match.get('team_score', 0)}-{match.get('enemy_score', 0)})\n"
         f"- **Played**: {match.get('started_at', '?')}\n"
@@ -145,10 +150,20 @@ def build_coaching_prompt(
 - **Defense**: {_pct(dfn.get('win_pct'))} WR, {_pct(dfn.get('early_death_pct'))} early-death rate, opening duels {_pct(dfn.get('opening_duel_win_pct'))} ({dfn.get('opening_duel_attempts', 0)} taken)
 """
 
-    if match_context and match_context.get("rounds"):
-        player_context += _format_match_context(
-            match_context.get("match", {}), match_context["rounds"]
-        )
+    if match_context:
+        if match_context.get("rounds"):
+            player_context += _format_match_context(
+                match_context.get("match", {}), match_context["rounds"]
+            )
+        else:
+            where = f" on {match_context['requested_map']}" if match_context.get("requested_map") else ""
+            player_context += (
+                f"\n## Match Under Review\n"
+                f"The player asked about a specific match{where}, but there are no "
+                f"matches{where} in their synced history. Say so plainly and suggest "
+                f"they play (or re-analyze) so the match gets picked up — do NOT ask "
+                f"for match IDs, logs, or screenshots; data arrives automatically.\n"
+            )
 
     # Format retrieved knowledge
     knowledge_context = "## Relevant Coaching Knowledge\n\n"
