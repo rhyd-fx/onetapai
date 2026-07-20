@@ -286,6 +286,15 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-white/5 bg-white/[0.02] text-xs font-bold text-white select-none">
             <UserIcon size={12} className="text-brand-blue" />
             <span>{user?.username}</span>
+            {user?.is_admin && (
+              <a
+                href="/admin"
+                title="Admin Console"
+                className="ml-1 px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider text-brand-blue border border-brand-blue/30 hover:bg-brand-blue/10 transition-colors"
+              >
+                Admin
+              </a>
+            )}
             <button 
               onClick={logout} 
               title="Log Out"

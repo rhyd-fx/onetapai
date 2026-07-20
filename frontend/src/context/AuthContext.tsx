@@ -8,6 +8,7 @@ interface UserProfile {
   username: string;
   email: string;
   linked_riot_id?: string | null;
+  is_admin?: boolean;
 }
 
 interface AuthContextType {

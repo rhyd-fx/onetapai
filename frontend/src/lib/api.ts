@@ -317,7 +317,7 @@ export async function verifyRegisterUser(email: string, code: string): Promise<A
   return res.json();
 }
 
-export async function verifyUserSession(): Promise<{ user_id: number; username: string; email: string; linked_riot_id: string | null }> {
+export async function verifyUserSession(): Promise<{ user_id: number; username: string; email: string; linked_riot_id: string | null; is_admin?: boolean }> {
   const res = await fetch(`${API_BASE}/api/v1/auth/me`, {
     method: "GET",
     headers: getHeaders(),
@@ -340,3 +340,83 @@ export async function fetchRecentSearches(): Promise<string[]> {
   return res.json();
 }
 
+
+// --- Admin panel ---
+
+export interface AdminOverview {
+  users: {
+    total: number;
+    disabled: number;
+    admins: number;
+    signups_24h: number;
+    signups_7d: number;
+    active_now: number;
+    active_24h: number;
+    active_7d: number;
+    linked_riot: number;
+  };
+  signups_by_day: { day: string; signups: number }[];
+  platform: {
+    matches_ingested: number;
+    players_tracked: number;
+    searches_24h: number;
+    coach_feedback_total: number;
+    coach_feedback_positive: number;
+    coach_feedback_7d: number;
+  };
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  email: string;
+  linked_riot_id: string | null;
+  is_admin: boolean;
+  is_disabled: boolean;
+  created_at: string | null;
+  last_seen_at: string | null;
+  searches: number;
+}
+
+export interface AdminUserList {
+  total: number;
+  page: number;
+  per_page: number;
+  users: AdminUser[];
+}
+
+async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { headers: getHeaders(), ...init });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export function fetchAdminOverview(): Promise<AdminOverview> {
+  return adminFetch("/api/v1/admin/overview");
+}
+
+export function fetchAdminUsers(params: {
+  q?: string;
+  status?: string;
+  sort?: string;
+  page?: number;
+  perPage?: number;
+}): Promise<AdminUserList> {
+  const sp = new URLSearchParams();
+  if (params.q) sp.set("q", params.q);
+  if (params.status && params.status !== "all") sp.set("status", params.status);
+  if (params.sort) sp.set("sort", params.sort);
+  sp.set("page", String(params.page ?? 1));
+  sp.set("per_page", String(params.perPage ?? 25));
+  return adminFetch(`/api/v1/admin/users?${sp.toString()}`);
+}
+
+export function setUserDisabled(userId: number, disabled: boolean): Promise<{ id: number; is_disabled: boolean }> {
+  return adminFetch(`/api/v1/admin/users/${userId}/${disabled ? "disable" : "enable"}`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}

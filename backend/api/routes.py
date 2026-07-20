@@ -56,6 +56,7 @@ import secrets
 import smtplib
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -477,12 +478,31 @@ def _init_auth_db():
             """)
             conn.commit()
             
-            # Alter table to add linked_riot_id safely
-            try:
-                cur.execute("ALTER TABLE users ADD COLUMN linked_riot_id VARCHAR(100) NULL")
+            # Idempotent column additions (MariaDB <10.5-safe: ignore dup errors)
+            for ddl in (
+                "ALTER TABLE users ADD COLUMN linked_riot_id VARCHAR(100) NULL",
+                "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE users ADD COLUMN is_disabled BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE users ADD COLUMN last_seen_at TIMESTAMP NULL DEFAULT NULL",
+            ):
+                try:
+                    cur.execute(ddl)
+                    conn.commit()
+                except Exception:
+                    pass
+
+            # Bootstrap admins: emails listed in ADMIN_EMAILS get the flag on
+            # boot. Flag is never revoked here — demote via the admin panel/DB.
+            admin_emails = [
+                e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()
+            ]
+            if admin_emails:
+                placeholders = ",".join(["%s"] * len(admin_emails))
+                cur.execute(
+                    f"UPDATE users SET is_admin = TRUE WHERE LOWER(email) IN ({placeholders})",
+                    admin_emails,
+                )
                 conn.commit()
-            except Exception:
-                pass
 
             # Create search_history table for private search tracking
             cur.execute("""
@@ -579,7 +599,43 @@ def get_current_user(authorization: str | None = Header(None)) -> dict:
             status_code=401,
             detail="Your session has expired. Please log in again."
         )
+
+    # DB-backed check so disabling/deleting an account takes effect immediately
+    # instead of when the JWT expires. Also powers last-seen presence tracking.
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, is_admin, is_disabled, last_seen_at FROM users WHERE id = %s",
+                    (payload.get("user_id"),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=401, detail="Account no longer exists. Please register again.")
+                if row["is_disabled"]:
+                    raise HTTPException(status_code=403, detail="This account has been disabled. Contact support if you believe this is a mistake.")
+                # Throttled presence write: at most one UPDATE per minute per user.
+                last_seen = row["last_seen_at"]
+                if last_seen is None or (datetime.now() - last_seen).total_seconds() > 60:
+                    cur.execute("UPDATE users SET last_seen_at = NOW() WHERE id = %s", (row["id"],))
+                    conn.commit()
+                payload["is_admin"] = bool(row["is_admin"])
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 — DB down: fail open on JWT alone
+        print(f"get_current_user DB check failed: {e}")
+        payload.setdefault("is_admin", False)
+
     return payload
+
+
+def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
 
 
 # --- Helpers ---
@@ -791,13 +847,15 @@ async def auth_login(request: Request, req: LoginRequest):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, username, email, password_hash FROM users WHERE username = %s OR email = %s",
+                "SELECT id, username, email, password_hash, is_disabled FROM users WHERE username = %s OR email = %s",
                 (user_input, user_input)
             )
             user = cur.fetchone()
             if not user or not verify_password(password, user["password_hash"]):
                 _record_login_fail(lockout_key)
                 raise HTTPException(status_code=401, detail="Invalid username or password.")
+            if user.get("is_disabled"):
+                raise HTTPException(status_code=403, detail="This account has been disabled. Contact support if you believe this is a mistake.")
 
             _clear_login_fails(lockout_key)
             token = generate_jwt({
@@ -819,14 +877,15 @@ async def auth_me(user: dict = Depends(get_current_user)):
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, username, email, linked_riot_id FROM users WHERE id = %s", (user.get("user_id"),))
+            cur.execute("SELECT id, username, email, linked_riot_id, is_admin FROM users WHERE id = %s", (user.get("user_id"),))
             db_user = cur.fetchone()
             if db_user:
                 return {
                     "user_id": db_user["id"],
                     "username": db_user["username"],
                     "email": db_user["email"],
-                    "linked_riot_id": db_user["linked_riot_id"]
+                    "linked_riot_id": db_user["linked_riot_id"],
+                    "is_admin": bool(db_user["is_admin"])
                 }
     except Exception:
         pass
@@ -837,7 +896,8 @@ async def auth_me(user: dict = Depends(get_current_user)):
         "user_id": user.get("user_id"),
         "username": user.get("username"),
         "email": user.get("email"),
-        "linked_riot_id": None
+        "linked_riot_id": None,
+        "is_admin": bool(user.get("is_admin"))
     }
 
 
@@ -857,6 +917,174 @@ async def get_recent_searches(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Could not retrieve search history.")
     finally:
         conn.close()
+
+
+# --- Admin panel ---
+
+class AdminUserAction(BaseModel):
+    reason: str | None = None
+
+
+@app.get("/api/v1/admin/overview")
+@limiter.limit("60/minute")
+async def admin_overview(request: Request, admin: dict = Depends(require_admin)):
+    """Headline stats for the admin dashboard."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            out: dict = {}
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       SUM(is_disabled) AS disabled,
+                       SUM(is_admin) AS admins,
+                       SUM(created_at >= NOW() - INTERVAL 1 DAY) AS signups_24h,
+                       SUM(created_at >= NOW() - INTERVAL 7 DAY) AS signups_7d,
+                       SUM(last_seen_at >= NOW() - INTERVAL 15 MINUTE) AS active_now,
+                       SUM(last_seen_at >= NOW() - INTERVAL 1 DAY) AS active_24h,
+                       SUM(last_seen_at >= NOW() - INTERVAL 7 DAY) AS active_7d,
+                       SUM(linked_riot_id IS NOT NULL) AS linked_riot
+                FROM users
+            """)
+            r = cur.fetchone()
+            out["users"] = {k: int(r[k] or 0) for k in r}
+
+            # Daily signups, last 30 days (calendar days with zero signups are
+            # filled client-side from the date range).
+            cur.execute("""
+                SELECT DATE(created_at) AS day, COUNT(*) AS signups
+                FROM users
+                WHERE created_at >= NOW() - INTERVAL 30 DAY
+                GROUP BY DATE(created_at) ORDER BY day
+            """)
+            out["signups_by_day"] = [
+                {"day": str(x["day"]), "signups": int(x["signups"])} for x in cur.fetchall()
+            ]
+
+            # Platform data volume + coach feedback health.
+            cur.execute("SELECT COUNT(*) AS c FROM matches")
+            matches_total = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM players")
+            players_total = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM search_history WHERE searched_at >= NOW() - INTERVAL 1 DAY")
+            searches_24h = int(cur.fetchone()["c"])
+            cur.execute("""
+                SELECT COUNT(*) AS total,
+                       SUM(rating = 1) AS thumbs_up,
+                       SUM(created_at >= NOW() - INTERVAL 7 DAY) AS last_7d
+                FROM coaching_feedback
+            """)
+            fb = cur.fetchone()
+            out["platform"] = {
+                "matches_ingested": matches_total,
+                "players_tracked": players_total,
+                "searches_24h": searches_24h,
+                "coach_feedback_total": int(fb["total"] or 0),
+                "coach_feedback_positive": int(fb["thumbs_up"] or 0),
+                "coach_feedback_7d": int(fb["last_7d"] or 0),
+            }
+            return out
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/users")
+@limiter.limit("60/minute")
+async def admin_list_users(
+    request: Request,
+    admin: dict = Depends(require_admin),
+    q: str | None = None,
+    status: str | None = None,   # all | active | disabled | admins
+    sort: str = "created",       # created | last_seen | username
+    page: int = 1,
+    per_page: int = 25,
+):
+    """Paginated, searchable user list."""
+    page = max(1, page)
+    per_page = min(max(1, per_page), 100)
+
+    clauses, params = [], []
+    if q:
+        like = f"%{q.strip()}%"
+        clauses.append("(username LIKE %s OR email LIKE %s OR linked_riot_id LIKE %s)")
+        params += [like, like, like]
+    if status == "disabled":
+        clauses.append("is_disabled = TRUE")
+    elif status == "active":
+        clauses.append("is_disabled = FALSE")
+    elif status == "admins":
+        clauses.append("is_admin = TRUE")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    order = {
+        "created": "created_at DESC",
+        "last_seen": "last_seen_at IS NULL, last_seen_at DESC",
+        "username": "username ASC",
+    }.get(sort, "created_at DESC")
+
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS c FROM users {where}", params)
+            total = int(cur.fetchone()["c"])
+            cur.execute(
+                f"""
+                SELECT id, username, email, linked_riot_id, is_admin, is_disabled,
+                       created_at, last_seen_at,
+                       (SELECT COUNT(*) FROM search_history sh WHERE sh.user_id = users.id) AS searches
+                FROM users {where}
+                ORDER BY {order}
+                LIMIT %s OFFSET %s
+                """,
+                params + [per_page, (page - 1) * per_page],
+            )
+            users = []
+            for u in cur.fetchall():
+                users.append({
+                    "id": u["id"],
+                    "username": u["username"],
+                    "email": u["email"],
+                    "linked_riot_id": u["linked_riot_id"],
+                    "is_admin": bool(u["is_admin"]),
+                    "is_disabled": bool(u["is_disabled"]),
+                    "created_at": u["created_at"].isoformat() if u["created_at"] else None,
+                    "last_seen_at": u["last_seen_at"].isoformat() if u["last_seen_at"] else None,
+                    "searches": int(u["searches"]),
+                })
+            return {"total": total, "page": page, "per_page": per_page, "users": users}
+    finally:
+        conn.close()
+
+
+def _admin_set_disabled(admin: dict, user_id: int, disabled: bool) -> dict:
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, username, is_admin FROM users WHERE id = %s", (user_id,))
+            target = cur.fetchone()
+            if not target:
+                raise HTTPException(status_code=404, detail="User not found.")
+            if target["id"] == admin.get("user_id"):
+                raise HTTPException(status_code=400, detail="You cannot disable your own account.")
+            if target["is_admin"] and disabled:
+                raise HTTPException(status_code=400, detail="Admins cannot be disabled. Revoke admin first (via ADMIN_EMAILS/DB).")
+            cur.execute("UPDATE users SET is_disabled = %s WHERE id = %s", (disabled, user_id))
+            conn.commit()
+        print(f"[ADMIN] {admin.get('username')} {'disabled' if disabled else 'enabled'} user {target['username']} (id={user_id})")
+        return {"id": user_id, "username": target["username"], "is_disabled": disabled}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/users/{user_id}/disable")
+@limiter.limit("30/minute")
+async def admin_disable_user(request: Request, user_id: int, body: AdminUserAction | None = None, admin: dict = Depends(require_admin)):
+    return _admin_set_disabled(admin, user_id, True)
+
+
+@app.post("/api/v1/admin/users/{user_id}/enable")
+@limiter.limit("30/minute")
+async def admin_enable_user(request: Request, user_id: int, body: AdminUserAction | None = None, admin: dict = Depends(require_admin)):
+    return _admin_set_disabled(admin, user_id, False)
 
 
 async def _sync_from_henrik(name: str, tag: str, region: str, size: int) -> dict:
