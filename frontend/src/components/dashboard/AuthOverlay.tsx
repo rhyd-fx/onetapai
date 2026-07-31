@@ -29,8 +29,15 @@ export default function AuthOverlay() {
       setErrorMsg("Email is required.");
       return;
     }
-    if (password.length < 12) {
+    // 12-char minimum applies to NEW accounts only. Accounts created before
+    // the rule was raised (6 -> 12) have shorter passwords and must still be
+    // able to log in — the backend verifies against the stored hash anyway.
+    if (isRegister && password.length < 12) {
       setErrorMsg("Password must be at least 12 characters.");
+      return;
+    }
+    if (!password) {
+      setErrorMsg("Password is required.");
       return;
     }
 

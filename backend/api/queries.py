@@ -1161,3 +1161,254 @@ def get_round_patterns(
             for side, s in sides.items()
         },
     }
+
+
+# ── Opponent-strength context ────────────────────────────────────────────
+# Raw ACS says nothing without knowing who the player faced. These queries
+# supply that context so the coach can separate "the lobby was harder" from
+# "you played worse".
+#
+# Scope note, measured on this DB: ranked matchmaking is tight — 86% of
+# matches have the enemy team's average tier within ±1 step of the player's,
+# and comparing each player against their own average shows lobby-average
+# difficulty moves ACS by only a few points. So there is deliberately NO
+# "expected ACS" model here; it would imply precision the data can't support.
+# What does show a real effect is the single strongest opponent: avg ACS
+# falls 220 -> 176 -> 130 as the best enemy goes from even-rank to +9 to +15.
+# That asymmetry is why get_duel_strength_profile is the load-bearing query.
+#
+# tier_id is TINYINT UNSIGNED: every tier subtraction must CAST(... AS
+# SIGNED) or MariaDB raises error 1690 the moment a delta goes negative.
+# Tier numbering is Valorant's competitiveTier: 3=Iron 1 … 27=Radiant, so
+# +3 is one full rank and +1 is one subtier.
+
+
+def _tier_name(tier_id: int) -> str:
+    """Render a competitiveTier number as its rank name."""
+    if tier_id <= 2:
+        return "Unranked"
+    names = ("Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ascendant", "Immortal")
+    idx = (tier_id - 3) // 3
+    if idx >= len(names):
+        return "Radiant"
+    return f"{names[idx]} {(tier_id - 3) % 3 + 1}"
+
+
+def get_lobby_context(
+    conn,
+    puuid: str,
+    match_limit: int = 20,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> list[dict] | None:
+    """Per-match lobby strength for the player's recent matches.
+
+    lobby_delta = avg enemy tier - player tier, in competitiveTier steps
+    (+3 = enemies averaged one full rank above the player). Returns None when
+    no match has usable tier data on both sides.
+    """
+    filter_str, params = _match_filters(game_modes, None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT me.match_id, m.map_id, m.started_at, me.acs, me.won,
+                   me.total_kills, me.total_deaths,
+                   CAST(me.tier_id AS SIGNED)          AS player_tier,
+                   AVG(CAST(en.tier_id AS SIGNED))     AS enemy_avg_tier,
+                   MAX(CAST(en.tier_id AS SIGNED))     AS enemy_max_tier,
+                   COUNT(en.id)                        AS enemies_tiered
+            FROM player_match_stats me
+            JOIN matches m ON m.match_id = me.match_id
+            JOIN player_match_stats en
+                 ON en.match_id = me.match_id
+                AND en.team_id <> me.team_id
+                AND en.tier_id > 0
+            WHERE me.puuid = %s AND me.tier_id > 0 AND me.total_rounds >= 5 {filter_str}
+            GROUP BY me.id, me.match_id, m.map_id, m.started_at, me.acs, me.won,
+                     me.total_kills, me.total_deaths, me.tier_id
+            ORDER BY m.started_at DESC
+            LIMIT %s
+            """,
+            [puuid] + params + [int(match_limit)],
+        )
+        rows = list(reversed(cur.fetchall()))
+
+    if not rows:
+        return None
+
+    out = []
+    for r in rows:
+        player_tier = int(r["player_tier"])
+        enemy_avg = _f(r["enemy_avg_tier"]) or 0.0
+        deaths = int(r["total_deaths"] or 0)
+        started = r["started_at"]
+        out.append(
+            {
+                "match_id": r["match_id"],
+                "map": r["map_id"],
+                "started_at": started.isoformat() if isinstance(started, datetime) else started,
+                "acs": round(_f(r["acs"]) or 0, 1),
+                "kd": round(int(r["total_kills"] or 0) / deaths, 2) if deaths else None,
+                "won": bool(r["won"]),
+                "player_tier": player_tier,
+                "player_tier_name": _tier_name(player_tier),
+                "enemy_avg_tier": round(enemy_avg, 2),
+                "enemy_max_tier": int(r["enemy_max_tier"]),
+                "enemy_max_tier_name": _tier_name(int(r["enemy_max_tier"])),
+                "enemies_tiered": int(r["enemies_tiered"]),
+                "lobby_delta": round(enemy_avg - player_tier, 2),
+                # The strongest single opponent is the part that actually
+                # moves the player's stat line.
+                "toughest_enemy_edge": int(r["enemy_max_tier"]) - player_tier,
+            }
+        )
+    return out
+
+
+def detect_rank_transition(
+    conn,
+    puuid: str,
+    match_limit: int = 40,
+    calibration_window: int = 15,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> dict | None:
+    """Most recent rank change and how the player has performed since.
+
+    A promotion moves the player into a bracket where everyone is stronger, so
+    raw ACS usually dips — against their own history that reads as a slump when
+    it's really a harder pool. Reporting the change with before/after ACS lets
+    the coach frame the dip as bracket adjustment.
+
+    Only plausible transitions count: a jump of more than 3 subtiers between
+    consecutive matches is a season reset or bad data, not a rank change.
+    """
+    lobby = get_lobby_context(conn, puuid, match_limit, game_modes)
+    if not lobby:
+        return None
+
+    change_idx = next(
+        (
+            i
+            for i in range(len(lobby) - 1, 0, -1)
+            if lobby[i]["player_tier"] != lobby[i - 1]["player_tier"]
+            and abs(lobby[i]["player_tier"] - lobby[i - 1]["player_tier"]) <= 3
+        ),
+        None,
+    )
+    if change_idx is None:
+        return None
+
+    before, after = lobby[:change_idx], lobby[change_idx:]
+    from_tier = before[-1]["player_tier"]
+    to_tier = after[0]["player_tier"]
+
+    def _avg(rows, key):
+        vals = [r[key] for r in rows if r[key] is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    return {
+        "direction": "promotion" if to_tier > from_tier else "demotion",
+        "from_tier_name": _tier_name(from_tier),
+        "to_tier_name": _tier_name(to_tier),
+        "matches_since": len(after),
+        "calibrating": len(after) <= calibration_window,
+        "acs_before": _avg(before, "acs"),
+        "acs_after": _avg(after, "acs"),
+        "kd_before": _avg(before, "kd"),
+        "kd_after": _avg(after, "kd"),
+    }
+
+
+def get_duel_strength_profile(
+    conn,
+    puuid: str,
+    match_limit: int = 20,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> dict | None:
+    """Kills and deaths split by the opponent's rank relative to the player.
+
+    Dying repeatedly to someone several tiers above is lobby context, not a
+    skill flaw; dying to lower-ranked opponents is the genuine red flag. Also
+    surfaces the single opponent responsible for the most deaths, which is how
+    one smurf can distort an entire match's stat line.
+    """
+    filter_str, params = _match_filters(game_modes, None)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT ke.killer_puuid, ke.victim_puuid, r.match_id,
+                   CAST(kt.tier_id AS SIGNED) AS killer_tier,
+                   CAST(vt.tier_id AS SIGNED) AS victim_tier,
+                   opp.game_name AS opponent_name, opp.tag_line AS opponent_tag
+            FROM kill_events ke
+            JOIN rounds r ON r.id = ke.round_id
+            JOIN (
+                SELECT m.match_id
+                FROM player_match_stats pms
+                JOIN matches m ON m.match_id = pms.match_id
+                WHERE pms.puuid = %s AND pms.tier_id > 0 AND pms.total_rounds >= 5 {filter_str}
+                ORDER BY m.started_at DESC
+                LIMIT %s
+            ) recent ON recent.match_id = r.match_id
+            JOIN player_match_stats kt ON kt.match_id = r.match_id AND kt.puuid = ke.killer_puuid
+            JOIN player_match_stats vt ON vt.match_id = r.match_id AND vt.puuid = ke.victim_puuid
+            JOIN players opp
+                 ON opp.puuid = IF(ke.killer_puuid = %s, ke.victim_puuid, ke.killer_puuid)
+            WHERE (ke.killer_puuid = %s OR ke.victim_puuid = %s)
+              AND kt.tier_id > 0 AND vt.tier_id > 0
+            """,
+            [puuid] + params + [int(match_limit), puuid, puuid, puuid],
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return None
+
+    kills = {"vs_stronger": 0, "vs_even": 0, "vs_weaker": 0}
+    deaths = {"to_stronger": 0, "to_even": 0, "to_weaker": 0}
+    deaths_by_opponent: dict[tuple, dict] = {}
+
+    for r in rows:
+        is_kill = r["killer_puuid"] == puuid
+        # Positive edge = the opponent outranks the player.
+        edge = (
+            int(r["victim_tier"]) - int(r["killer_tier"])
+            if is_kill
+            else int(r["killer_tier"]) - int(r["victim_tier"])
+        )
+        band = "stronger" if edge >= 2 else ("weaker" if edge <= -2 else "even")
+        if is_kill:
+            kills[f"vs_{band}"] += 1
+        else:
+            deaths[f"to_{band}"] += 1
+            key = (r["opponent_name"], r["opponent_tag"])
+            slot = deaths_by_opponent.setdefault(key, {"deaths": 0, "tier_edge": edge})
+            slot["deaths"] += 1
+            # Keep the largest edge seen: an opponent who outranks the player
+            # is the headline, not whichever duel happened to come first.
+            slot["tier_edge"] = max(slot["tier_edge"], edge)
+
+    total_deaths = sum(deaths.values())
+    total_kills = sum(kills.values())
+    top = max(deaths_by_opponent.items(), key=lambda kv: kv[1]["deaths"], default=None)
+
+    result = {
+        "matches_covered": len({r["match_id"] for r in rows}),
+        "kills": {**kills, "total": total_kills},
+        "deaths": {**deaths, "total": total_deaths},
+        "deaths_to_stronger_pct": round(deaths["to_stronger"] / total_deaths * 100, 1) if total_deaths else None,
+        "deaths_to_weaker_pct": round(deaths["to_weaker"] / total_deaths * 100, 1) if total_deaths else None,
+        "kills_vs_stronger_pct": round(kills["vs_stronger"] / total_kills * 100, 1) if total_kills else None,
+        "nemesis": None,
+    }
+    # Only call out a nemesis when one opponent is a meaningful share of deaths.
+    if top and total_deaths and top[1]["deaths"] >= max(3, total_deaths * 0.15):
+        (name, tag), info = top
+        result["nemesis"] = {
+            "name": f"{name}#{tag}",
+            "deaths": info["deaths"],
+            "share_pct": round(info["deaths"] / total_deaths * 100, 1),
+            "tier_edge": info["tier_edge"],
+        }
+    return result

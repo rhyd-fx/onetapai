@@ -23,6 +23,20 @@ Your coaching style:
   death timings (early deaths = over-aggression, late = clutch situations),
   side-specific patterns (attack vs defense), and momentum swings (lost
   streaks after won rounds). Cite specific round numbers as evidence.
+- Judge performance against the OPPONENTS FACED, never against raw numbers
+  alone. When an "Opponent Context" section is present:
+  - Never call a lower ACS a decline without first checking whether the
+    player was facing stronger opponents. Say which it was.
+  - After a promotion, expect a dip: the player is now the weakest-ranked
+    in lobbies they used to top. Frame it as adjusting to a harder bracket,
+    not as regression, and do not tell them they are playing worse.
+  - Deaths to clearly higher-ranked opponents are lobby context, not a flaw
+    to fix. Deaths to LOWER-ranked opponents are the real signal worth
+    coaching — that is where to focus.
+  - Ranked lobbies are usually within one rank step, so small differences in
+    average lobby rank mean nothing. Only draw conclusions from a clearly
+    lopsided gap or from one specific much-stronger opponent.
+  - Never invent an "expected ACS" for a rank. Use only the numbers given.
 
 You have access to the player's detailed analysis and relevant coaching
 knowledge. Ground your responses in this data — do not hallucinate
@@ -64,6 +78,77 @@ def _format_match_context(match: dict, rounds: list[dict]) -> str:
             f"| {r['opening_duel'] or '-'} | {'; '.join(notes) or '-'} |"
         )
     return header + "\n".join(lines) + "\n"
+
+
+def _format_opponent_context(
+    lobby: list[dict] | None,
+    transition: dict | None,
+    duels: dict | None,
+) -> str:
+    """Render who the player actually faced, so the coach can separate
+    "the lobby got harder" from "you played worse"."""
+    if not (lobby or transition or duels):
+        return ""
+
+    out = "\n## Opponent Context\n"
+
+    if lobby:
+        recent = lobby[-5:]
+        avg_delta = sum(m["lobby_delta"] for m in lobby) / len(lobby)
+        harder = sum(1 for m in lobby if m["lobby_delta"] >= 1)
+        out += (
+            f"- **Current rank**: {lobby[-1]['player_tier_name']}\n"
+            f"- **Lobby difficulty (last {len(lobby)})**: enemy teams averaged "
+            f"{avg_delta:+.2f} rank steps vs the player "
+            f"({harder} clearly harder than their own rank). "
+            f"One step = one subtier; ranked lobbies are normally within ±1, "
+            f"so treat small values as even.\n"
+            "\n| Match | Player rank | Enemy avg (steps) | Toughest enemy | ACS |\n"
+            "|-------|-------------|-------------------|----------------|-----|\n"
+        )
+        for m in recent:
+            out += (
+                f"| {m['map']} | {m['player_tier_name']} | {m['lobby_delta']:+.2f} "
+                f"| {m['enemy_max_tier_name']} ({m['toughest_enemy_edge']:+d}) | {m['acs']} |\n"
+            )
+
+    if transition:
+        d = transition["direction"]
+        out += (
+            f"\n- **Recent {d}**: {transition['from_tier_name']} → "
+            f"{transition['to_tier_name']}, {transition['matches_since']} matches ago. "
+            f"ACS {transition['acs_before']} → {transition['acs_after']}, "
+            f"K/D {transition['kd_before']} → {transition['kd_after']}.\n"
+        )
+        if transition.get("calibrating") and d == "promotion":
+            out += (
+                "  Still adjusting to the new bracket — a dip here is expected, "
+                "because everyone in these lobbies is stronger than before. "
+                "Do NOT describe this as the player getting worse.\n"
+            )
+
+    if duels:
+        k, dth = duels["kills"], duels["deaths"]
+        out += (
+            f"\n- **Duels (last {duels['matches_covered']} matches)**: "
+            f"killed {k['vs_stronger']} higher-ranked / {k['vs_even']} even / "
+            f"{k['vs_weaker']} lower-ranked; "
+            f"died to {dth['to_stronger']} higher-ranked / {dth['to_even']} even / "
+            f"{dth['to_weaker']} lower-ranked.\n"
+        )
+        if duels.get("deaths_to_weaker_pct") is not None:
+            out += (
+                f"  {duels['deaths_to_weaker_pct']}% of deaths came from "
+                f"LOWER-ranked opponents — this is the coachable part.\n"
+            )
+        nem = duels.get("nemesis")
+        if nem:
+            out += (
+                f"  Single opponent {nem['name']} caused {nem['deaths']} deaths "
+                f"({nem['share_pct']}% of all deaths, {nem['tier_edge']:+d} rank steps).\n"
+            )
+
+    return out
 
 
 def build_coaching_prompt(
@@ -149,6 +234,14 @@ def build_coaching_prompt(
 - **Attack**: {_pct(atk.get('win_pct'))} WR, {_pct(atk.get('early_death_pct'))} early-death rate, opening duels {_pct(atk.get('opening_duel_win_pct'))} ({atk.get('opening_duel_attempts', 0)} taken)
 - **Defense**: {_pct(dfn.get('win_pct'))} WR, {_pct(dfn.get('early_death_pct'))} early-death rate, opening duels {_pct(dfn.get('opening_duel_win_pct'))} ({dfn.get('opening_duel_attempts', 0)} taken)
 """
+
+    opponents = _format_opponent_context(
+        player_profile.get("lobby_context"),
+        player_profile.get("rank_transition"),
+        player_profile.get("duel_strength"),
+    )
+    if opponents:
+        player_context += opponents
 
     if match_context:
         if match_context.get("rounds"):

@@ -41,6 +41,9 @@ from api.queries import (
     find_recent_match,
     get_match_rounds,
     get_round_patterns,
+    get_lobby_context,
+    detect_rank_transition,
+    get_duel_strength_profile,
 )
 from api.auth_utils import hash_password, verify_password, generate_jwt, verify_jwt
 from rag.retriever import CoachingRetriever
@@ -723,6 +726,15 @@ async def auth_register(request: Request, req: RegisterRequest):
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
     if len(username) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters.")
+    # Letters, digits, underscore, dot, dash only. Notably no "@" or spaces:
+    # login accepts username OR email in one field, so an @ in a username
+    # could shadow another user's email address. Existing accounts are
+    # untouched — this only gates new registrations.
+    if len(username) > 30 or not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username can only contain letters, numbers, underscores, dots, and dashes (max 30 characters)."
+        )
     if len(password) < 12:
         raise HTTPException(status_code=400, detail="Password must be at least 12 characters.")
 
@@ -1375,6 +1387,15 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
                     patterns = get_round_patterns(conn, puuid, game_modes=_STANDARD_MODES)
                     if patterns:
                         profile["round_patterns"] = patterns
+                    lobby = get_lobby_context(conn, puuid)
+                    if lobby:
+                        profile["lobby_context"] = lobby
+                    transition = detect_rank_transition(conn, puuid)
+                    if transition:
+                        profile["rank_transition"] = transition
+                    duels = get_duel_strength_profile(conn, puuid)
+                    if duels:
+                        profile["duel_strength"] = duels
                     match_context = _resolve_match_context(conn, puuid, req.question)
             finally:
                 conn.close()
