@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Search, SlidersHorizontal, LogOut, User as UserIcon, Sparkles, Target, BrainCircuit, Activity, ChevronRight, ChevronDown, Gamepad2 } from 'lucide-react';
-import { analyzePlayer, AnalyzeResponse, fetchRecentSearches } from '@/lib/api';
+import { analyzePlayer, AnalyzeResponse, fetchRecentSearches, fetchProgress, ProgressResponse } from '@/lib/api';
 import { buildViewModel, getSeasonName } from '@/lib/viewModel';
 import { useAuth } from '@/context/AuthContext';
 import AuthOverlay from './dashboard/AuthOverlay';
@@ -13,6 +13,7 @@ import TopWeapons from './dashboard/TopWeapons';
 import CoachAnalysis from './dashboard/CoachAnalysis';
 import CoachPanel from './dashboard/CoachPanel';
 import ShareCard from './dashboard/ShareCard';
+import ProgressHome from './dashboard/ProgressHome';
 import { Panel, SectionTitle } from './dashboard/primitives';
 import ACSTrajectoryChart from './ACSTrajectoryChart';
 import MapHeatmap from './MapHeatmap';
@@ -182,6 +183,16 @@ export default function Dashboard() {
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [showAllMatches, setShowAllMatches] = useState(false);
 
+  // Progress-first landing: the logged-in user's own improvement loads
+  // automatically; the full diagnostics grid is collapsed behind a toggle.
+  const [progress, setProgress] = useState<ProgressResponse | null>(null);
+  const [progressLoading, setProgressLoading] = useState(false);
+  const [showDeepStats, setShowDeepStats] = useState(false);
+
+  const linkedId = user?.linked_riot_id && user.linked_riot_id.includes('#') ? user.linked_riot_id : null;
+  // Viewing yourself (progress hero) vs scouting someone else (classic view).
+  const viewingSelf = !!linkedId && (!result || `${result.player_profile.game_name}#${result.player_profile.tag_line}` === linkedId);
+
   const RECENT_MATCH_LIMIT = 10;
 
   useEffect(() => {
@@ -189,6 +200,33 @@ export default function Dashboard() {
       fetchRecentSearches().then(setRecentSearches).catch(console.error);
     }
   }, [isLoggedIn]);
+
+  // Auto-load the user's own progress on login: instant DB read first, then a
+  // background sync (analyze) picks up new matches and refreshes the rating.
+  useEffect(() => {
+    if (!isLoggedIn || !linkedId) return;
+    let cancelled = false;
+    setProgressLoading(true);
+    fetchProgress(linkedId)
+      .then((p) => { if (!cancelled) setProgress(p); })
+      .catch(() => { if (!cancelled) setProgress(null); })
+      .finally(() => { if (!cancelled) setProgressLoading(false); });
+
+    analyzePlayer(linkedId, region)
+      .then(async (r) => {
+        if (cancelled) return;
+        setResult(r);
+        setRiotId(linkedId);
+        // New matches may have been ingested by the sync — refresh the rating.
+        try {
+          const p = await fetchProgress(linkedId);
+          if (!cancelled) setProgress(p);
+        } catch { /* keep the first load */ }
+      })
+      .catch(() => { /* progress view still works without deep stats */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoggedIn, linkedId]);
 
   if (authLoading) {
     return (
@@ -342,9 +380,59 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* ── PROGRESS-FIRST LANDING: your improvement, before any diagnostics ── */}
+      {viewingSelf && progress?.available && (
+        <div className="mb-8 animate-fade-in space-y-4">
+          <ProgressHome progress={progress} riotId={linkedId!} />
+
+          {/* The coach lives on the landing — it's the improvement loop. */}
+          <section className="grid gap-4 lg:grid-cols-3">
+            <Panel glow="red" className="flex flex-col p-5 lg:col-span-2">
+              <SectionTitle>Live Coach · Ask about your mission</SectionTitle>
+              <div className="min-h-[20rem] flex-1">
+                <CoachPanel key={linkedId} riotId={linkedId!} region={region} />
+              </div>
+            </Panel>
+            <Panel glow="blue" className="flex flex-col p-5">
+              <SectionTitle accent="blue">Share Your Card</SectionTitle>
+              {vm ? (
+                <div className="flex-1 flex flex-col justify-center"><ShareCard vm={vm} /></div>
+              ) : (
+                <p className="text-xs text-muted animate-pulse">Syncing your latest matches…</p>
+              )}
+            </Panel>
+          </section>
+
+          {vm && (
+            <div className="flex justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDeepStats((v) => !v)}
+                className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-5 py-2 text-[11px] font-black uppercase tracking-widest text-muted/80 transition-all duration-300 hover:border-brand-blue/30 hover:bg-brand-blue/[0.06] hover:text-white"
+              >
+                {showDeepStats ? 'Hide deep stats' : 'Deep stats & diagnostics'}
+                <ChevronDown size={14} className={`transition-transform duration-300 ${showDeepStats ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* First paint while your progress loads (only when an account is linked) */}
+      {viewingSelf && !progress?.available && progressLoading && (
+        <div className="mb-8 grid min-h-[30vh] place-items-center text-center animate-pulse">
+          <div>
+            <div className="mx-auto mb-4 h-20 w-20 rounded-full bg-gradient-to-br from-brand-red/30 to-brand-blue/20 blur-2xl" />
+            <div className="text-xs font-black uppercase tracking-widest text-brand-blue/80">Loading your progress…</div>
+          </div>
+        </div>
+      )}
+
       {!vm ? (
-        <EmptyState loading={loading} recentSearches={recentSearches} onSelectPlayer={handleSelectDemoPlayer} />
-      ) : (
+        viewingSelf && (progress?.available || progressLoading) ? null : (
+          <EmptyState loading={loading} recentSearches={recentSearches} onSelectPlayer={handleSelectDemoPlayer} />
+        )
+      ) : viewingSelf && !showDeepStats ? null : (
         <div className="space-y-8 animate-fade-in">
           {/* Diagnostic filters */}
           <div className="flex flex-col gap-4 rounded-2xl border border-line bg-ink-950/40 p-4 backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
@@ -614,26 +702,28 @@ export default function Dashboard() {
 
           <CoachAnalysis vm={vm} />
 
-          {/* LIVE COACH + EXPORT */}
-          <section className="grid gap-4 lg:grid-cols-3">
-            <Panel glow="red" className="flex flex-col p-5 lg:col-span-2">
-              <SectionTitle>Live Coach · RAG</SectionTitle>
-              <div className="min-h-[20rem] flex-1">
-                {/* key resets the chat (greeting + history) when the player changes */}
-                <CoachPanel key={vm.riotId} riotId={vm.riotId} region={region} />
-              </div>
-            </Panel>
-            <Panel glow="blue" className="flex flex-col p-5">
-              <SectionTitle accent="blue">Share Your Card</SectionTitle>
-              <p className="text-xs leading-relaxed text-muted mb-4">
-                Export a 1080×1920 story card with your top stats, best &amp; worst maps, and the
-                AI summary. Perfect for flexing your grind.
-              </p>
-              <div className="flex-1 flex flex-col justify-center">
-                <ShareCard vm={vm} />
-              </div>
-            </Panel>
-          </section>
+          {/* LIVE COACH + EXPORT — on the landing when viewing yourself */}
+          {!viewingSelf && (
+            <section className="grid gap-4 lg:grid-cols-3">
+              <Panel glow="red" className="flex flex-col p-5 lg:col-span-2">
+                <SectionTitle>Live Coach · RAG</SectionTitle>
+                <div className="min-h-[20rem] flex-1">
+                  {/* key resets the chat (greeting + history) when the player changes */}
+                  <CoachPanel key={vm.riotId} riotId={vm.riotId} region={region} />
+                </div>
+              </Panel>
+              <Panel glow="blue" className="flex flex-col p-5">
+                <SectionTitle accent="blue">Share Your Card</SectionTitle>
+                <p className="text-xs leading-relaxed text-muted mb-4">
+                  Export a 1080×1920 story card with your top stats, best &amp; worst maps, and the
+                  AI summary. Perfect for flexing your grind.
+                </p>
+                <div className="flex-1 flex flex-col justify-center">
+                  <ShareCard vm={vm} />
+                </div>
+              </Panel>
+            </section>
+          )}
         </div>
       )}
     </div>

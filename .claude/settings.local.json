@@ -136,7 +136,13 @@
       "Bash(curl -s -X POST http://127.0.0.1:8099/api/v1/auth/login -H \"Content-Type: application/json\" -d '{\"username_or_email\":\"underscore@test.local\",\"password\":\"short1\"}')",
       "Bash(sed -i 's/from config import get_db_connection/from ingestion.etl import get_db_connection/' /tmp/tiercheck.py)",
       "Bash(timeout 90 .venv/bin/python /tmp/tiercheck.py)",
-      "Bash(.venv/bin/python *)"
+      "Bash(.venv/bin/python *)",
+      "Bash(curl -s -m 10 localhost:8899/health)",
+      "Bash(curl -s -m 10 \"localhost:8899/api/v1/player/Friday%23PlayZ/progress\" -H \"Authorization: Bearer x\")",
+      "Bash(npm run *)",
+      "Bash(curl -s -m 15 -o /dev/null -w \"dashboard page: %{http_code}\\\\n\" localhost:3399/dashboard)",
+      "Bash(curl -s -m 15 localhost:3399/dashboard)",
+      "Bash(curl -s -m 20 localhost:3399/dashboard)"
     ]
   }
 }

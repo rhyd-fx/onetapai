@@ -341,6 +341,76 @@ export async function fetchRecentSearches(): Promise<string[]> {
 }
 
 
+// --- Progress tracker (OneTap Rating) ---
+
+export type PillarKey = 'damage' | 'survival' | 'impact' | 'precision';
+
+export interface OtrMatch {
+  match_id: string;
+  map: string;
+  started_at: string;
+  won: boolean;
+  acs: number;
+  otr: number;
+  pillars: Record<PillarKey, number>;
+}
+
+export interface OtrMission {
+  pillar: PillarKey;
+  pillar_score: number;
+  title: string;
+  why: string;
+  goal: string;
+  how: string;
+  matches: number;
+}
+
+export interface OtrRecap {
+  otr: number;
+  otr_delta: number;
+  trend: string;
+  record: string;
+  best_pillar_gain: { pillar: PillarKey; delta: number } | null;
+  best_match: OtrMatch;
+  rank_change?: string;
+}
+
+export interface ProgressResponse {
+  available: boolean;
+  reason?: string;
+  matches_scored?: number;
+  matches?: OtrMatch[];
+  otr?: number;
+  otr_previous?: number | null;
+  trend?: 'improving' | 'flat' | 'declining';
+  noise_band?: number;
+  pillars?: Record<PillarKey, number>;
+  weakest_pillar?: PillarKey;
+  percentile?: { percentile: number; cohort_size: number; cohort_rank_name: string } | null;
+  mission?: OtrMission;
+  recap?: OtrRecap | null;
+  rank_transition?: {
+    direction: string;
+    from_tier_name: string;
+    to_tier_name: string;
+    matches_since: number;
+    calibrating: boolean;
+  } | null;
+}
+
+export async function fetchProgress(riotId: string, lastN = 30): Promise<ProgressResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/v1/player/${encodeURIComponent(riotId)}/progress?last_n=${lastN}`,
+    { headers: getHeaders() }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+
 // --- Admin panel ---
 
 export interface AdminOverview {

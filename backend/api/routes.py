@@ -44,6 +44,10 @@ from api.queries import (
     get_lobby_context,
     detect_rank_transition,
     get_duel_strength_profile,
+    get_otr_profile,
+    get_otr_percentile,
+    build_otr_mission,
+    build_weekly_recap,
 )
 from api.auth_utils import hash_password, verify_password, generate_jwt, verify_jwt
 from rag.retriever import CoachingRetriever
@@ -1396,6 +1400,18 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
                     duels = get_duel_strength_profile(conn, puuid)
                     if duels:
                         profile["duel_strength"] = duels
+                    otr = get_otr_profile(conn, puuid)
+                    if otr:
+                        # Keep the prompt lean: headline + pillars + mission,
+                        # not the full per-match list.
+                        profile["otr"] = {
+                            "otr": otr["otr"],
+                            "otr_previous": otr["otr_previous"],
+                            "trend": otr["trend"],
+                            "pillars": otr["pillars"],
+                            "weakest_pillar": otr["weakest_pillar"],
+                            "mission": build_otr_mission(otr),
+                        }
                     match_context = _resolve_match_context(conn, puuid, req.question)
             finally:
                 conn.close()
@@ -1532,4 +1548,36 @@ async def get_economy_impact(riot_id: str, last_n: int = 20, user: dict = Depend
         return split
     finally:
         conn.close()
+
+
+@app.get("/api/v1/player/{riot_id}/progress")
+async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_current_user)):
+    """The daily progress tracker: OneTap Rating (lobby-relative, so already
+    rank- and smurf-adjusted), pillar breakdown, rank-cohort percentile, the
+    current weak-pillar mission, and a shareable recap."""
+    name, tag = _split_riot_id(riot_id)
+    conn = _connect()
+    try:
+        puuid = resolve_puuid(conn, name, tag)
+        if not puuid:
+            raise HTTPException(status_code=404, detail=f"No ingested data for {riot_id}.")
+        profile = get_otr_profile(conn, puuid, match_limit=last_n)
+        if not profile:
+            return {
+                "available": False,
+                "reason": "No scored ranked matches yet — play a Competitive match and re-sync.",
+            }
+        transition = detect_rank_transition(conn, puuid)
+        percentile = get_otr_percentile(conn, puuid, profile["otr"])
+    finally:
+        conn.close()
+
+    return {
+        "available": True,
+        **profile,
+        "percentile": percentile,
+        "mission": build_otr_mission(profile),
+        "recap": build_weekly_recap(profile, transition),
+        "rank_transition": transition,
+    }
 

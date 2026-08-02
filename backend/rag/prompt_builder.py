@@ -243,6 +243,22 @@ def build_coaching_prompt(
     if opponents:
         player_context += opponents
 
+    otr = player_profile.get("otr")
+    if otr:
+        pillars = otr.get("pillars", {})
+        mission = otr.get("mission") or {}
+        prev = otr.get("otr_previous")
+        player_context += f"""
+## OneTap Rating (lobby-relative performance, 50 = lobby average)
+- **Current OTR (last 10 matches)**: {otr.get('otr')}{f" (previous 10: {prev}, trend: {otr.get('trend')})" if prev is not None else ""}
+- **Pillars (0-100)**: damage {pillars.get('damage')}, survival {pillars.get('survival')}, impact {pillars.get('impact')}, precision {pillars.get('precision')}
+- **Weakest pillar**: {otr.get('weakest_pillar')}
+- **Active mission**: {mission.get('title', 'none')} — {mission.get('goal', '')}
+OTR compares the player to the other 9 in each of their own lobbies, so it is
+already rank- and opponent-adjusted; trend moves inside ±3 points are noise.
+When coaching, anchor advice to the weakest pillar and the active mission.
+"""
+
     if match_context:
         if match_context.get("rounds"):
             player_context += _format_match_context(

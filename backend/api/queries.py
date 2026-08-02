@@ -1412,3 +1412,290 @@ def get_duel_strength_profile(
             "tier_edge": info["tier_edge"],
         }
     return result
+
+
+# ── OneTap Rating (OTR) ──────────────────────────────────────────────────
+# One number for "did you outplay the people in front of you". Each pillar
+# is a z-score against the OTHER 9 players in the same lobby, which makes
+# the score rank-, map- and smurf-adjusted by construction: topping a Bronze
+# lobby scores the same as topping an Immortal lobby.
+#
+# Pillars and weights are empirical, not aesthetic (measured on this DB by
+# comparing lobby top-2 vs bottom-5, and won vs lost rounds):
+#   damage/round   0.45  — the engine: 207 vs 133 dmg/round top-2 vs rest
+#   survival       0.25  — 52.9% survival in won rounds vs 1.3% in lost
+#   impact         0.20  — opening kills + multikill rounds
+#   precision      0.10  — headshot rate; real but most lobby-dependent
+# Trades and early deaths were tested and rejected: both are flat or
+# inverted across ranks (Immortals die early MORE than Bronze — deliberate
+# aggression), so rewarding them would coach players downward.
+#
+# Validation (7,350 player-matches): AUC predicting the match win — OTR
+# 0.743 vs ACS-percentile 0.592. Monotonic: OTR 33 → 4.5% win rate,
+# 50 → 51%, 69 → 94%. Single-match SD ≈ 8 points; rolling-10 noise band
+# ≈ ±2.6 — treat trend moves inside ±3 as noise.
+OTR_WEIGHTS = {"damage": 0.45, "survival": 0.25, "impact": 0.20, "precision": 0.10}
+OTR_SCALE = 12.0  # z-units → points; 50 = lobby average
+OTR_NOISE_BAND = 3.0  # rolling-10 moves inside ±this are noise
+OTR_WINDOW = 10
+
+_OTR_MATCH_SQL = """
+WITH pm AS (
+    SELECT r.match_id, prs.puuid,
+           SUM(prs.damage_dealt) / COUNT(*)                  AS dmg_pr,
+           AVG(prs.deaths = 0)                               AS surv,
+           MAX(pms.headshot_pct)                             AS hs,
+           SUM(prs.kills >= 2) / COUNT(*)                    AS multi,
+           SUM(EXISTS(
+               SELECT 1 FROM kill_events ke
+               WHERE ke.round_id = r.id
+                 AND ke.killer_puuid = prs.puuid
+                 AND ke.is_opening_kill
+           )) / COUNT(*)                                     AS ok_rate,
+           MAX(pms.won)                                      AS won,
+           MAX(pms.acs)                                      AS acs
+    FROM player_round_stats prs
+    JOIN rounds r  ON r.id = prs.round_id
+    JOIN matches m ON m.match_id = r.match_id
+    JOIN player_match_stats pms
+         ON pms.match_id = r.match_id AND pms.puuid = prs.puuid
+    WHERE m.game_mode IN ({modes}) AND pms.total_rounds >= 5
+    GROUP BY r.match_id, prs.puuid
+)
+SELECT match_id, puuid, won, acs,
+       COALESCE((dmg_pr - AVG(dmg_pr) OVER w) / NULLIF(STDDEV_POP(dmg_pr) OVER w, 0), 0) AS z_damage,
+       COALESCE((surv   - AVG(surv)   OVER w) / NULLIF(STDDEV_POP(surv)   OVER w, 0), 0) AS z_survival,
+       COALESCE(((multi + ok_rate) - AVG(multi + ok_rate) OVER w)
+                / NULLIF(STDDEV_POP(multi + ok_rate) OVER w, 0), 0)                      AS z_impact,
+       COALESCE((hs - AVG(hs) OVER w) / NULLIF(STDDEV_POP(hs) OVER w, 0), 0)             AS z_precision
+FROM pm
+WINDOW w AS (PARTITION BY match_id)
+"""
+
+
+def _otr_from_z(z: dict) -> float:
+    return 50.0 + OTR_SCALE * sum(OTR_WEIGHTS[p] * z[p] for p in OTR_WEIGHTS)
+
+
+def _pillar_score(zval: float) -> int:
+    """Map a lobby z-score to a 0-100 pillar display score (50 = lobby avg)."""
+    return int(max(0, min(100, round(50 + 16 * zval))))
+
+
+def get_otr_profile(
+    conn,
+    puuid: str,
+    match_limit: int = 30,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> dict | None:
+    """OneTap Rating over the player's recent matches.
+
+    Returns per-match OTR + pillar breakdown (chronological), the rolling
+    OTR_WINDOW headline, a trend verdict gated on the noise band, and the
+    weakest pillar. None when the player has no scored ranked matches.
+    """
+    modes = game_modes or RANKED_MODES
+    placeholders = ",".join(["%s"] * len(modes))
+    sql = f"""
+        SELECT z.*, m.map_id, m.started_at
+        FROM ({_OTR_MATCH_SQL.format(modes=placeholders)}) z
+        JOIN matches m ON m.match_id = z.match_id
+        WHERE z.puuid = %s
+        ORDER BY m.started_at DESC
+        LIMIT %s
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, list(modes) + [puuid, int(match_limit)])
+        rows = list(reversed(cur.fetchall()))
+    if not rows:
+        return None
+
+    matches = []
+    for r in rows:
+        z = {p: float(r[f"z_{p}"]) for p in OTR_WEIGHTS}
+        started = r["started_at"]
+        matches.append(
+            {
+                "match_id": r["match_id"],
+                "map": r["map_id"],
+                "started_at": started.isoformat() if isinstance(started, datetime) else started,
+                "won": bool(r["won"]),
+                "acs": round(_f(r["acs"]) or 0, 1),
+                "otr": round(_otr_from_z(z), 1),
+                "pillars": {p: _pillar_score(z[p]) for p in OTR_WEIGHTS},
+            }
+        )
+
+    otrs = [m["otr"] for m in matches]
+    current = round(sum(otrs[-OTR_WINDOW:]) / len(otrs[-OTR_WINDOW:]), 1)
+    previous = None
+    if len(otrs) >= OTR_WINDOW + 5:
+        prev_slice = otrs[-2 * OTR_WINDOW : -OTR_WINDOW] or otrs[: -OTR_WINDOW]
+        previous = round(sum(prev_slice) / len(prev_slice), 1)
+
+    trend = "flat"
+    if previous is not None:
+        delta = current - previous
+        if delta > OTR_NOISE_BAND:
+            trend = "improving"
+        elif delta < -OTR_NOISE_BAND:
+            trend = "declining"
+
+    # Pillar averages over the current window drive the mission.
+    window = matches[-OTR_WINDOW:]
+    pillar_avg = {
+        p: round(sum(m["pillars"][p] for m in window) / len(window)) for p in OTR_WEIGHTS
+    }
+    weakest = min(pillar_avg, key=pillar_avg.get)
+
+    return {
+        "matches_scored": len(matches),
+        "matches": matches,
+        "otr": current,
+        "otr_previous": previous,
+        "trend": trend,
+        "noise_band": OTR_NOISE_BAND,
+        "pillars": pillar_avg,
+        "weakest_pillar": weakest,
+    }
+
+
+def get_otr_percentile(
+    conn,
+    puuid: str,
+    otr: float,
+    game_modes: Sequence[str] | None = RANKED_MODES,
+) -> dict | None:
+    """Where the player's rolling OTR sits among same-rank players in our DB.
+
+    Cohort = per-player mean OTR of everyone whose latest tier is within one
+    full rank (±3 subtiers). Returns None when the cohort is too small to be
+    meaningful (fewer than 20 players).
+    """
+    modes = game_modes or RANKED_MODES
+    placeholders = ",".join(["%s"] * len(modes))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT CAST(pms.tier_id AS SIGNED) AS tier
+            FROM player_match_stats pms
+            JOIN matches m ON m.match_id = pms.match_id
+            WHERE pms.puuid = %s AND pms.tier_id > 0
+            ORDER BY m.started_at DESC LIMIT 1
+            """,
+            (puuid,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        tier = int(row["tier"])
+
+        cur.execute(
+            f"""
+            SELECT z.puuid,
+                   AVG(50 + %s * (0.45 * z.z_damage + 0.25 * z.z_survival
+                                  + 0.20 * z.z_impact + 0.10 * z.z_precision)) AS mean_otr
+            FROM ({_OTR_MATCH_SQL.format(modes=placeholders)}) z
+            JOIN (
+                SELECT pms.puuid, CAST(pms.tier_id AS SIGNED) AS tier,
+                       ROW_NUMBER() OVER (PARTITION BY pms.puuid ORDER BY m.started_at DESC) rn
+                FROM player_match_stats pms
+                JOIN matches m ON m.match_id = pms.match_id
+                WHERE pms.tier_id > 0
+            ) lt ON lt.puuid = z.puuid AND lt.rn = 1
+                AND lt.tier BETWEEN %s AND %s
+            GROUP BY z.puuid
+            HAVING COUNT(*) >= 3
+            """,
+            [OTR_SCALE] + list(modes) + [tier - 3, tier + 3],
+        )
+        cohort = [float(r["mean_otr"]) for r in cur.fetchall()]
+
+    if len(cohort) < 20:
+        return None
+    below = sum(1 for v in cohort if v < otr)
+    return {
+        "percentile": round(below / len(cohort) * 100),
+        "cohort_size": len(cohort),
+        "cohort_rank_name": _tier_name(tier),
+    }
+
+
+# Mission templates per pillar: concrete, checkable next-N-matches targets.
+# Thresholds are lobby-relative in spirit but phrased in absolute terms the
+# player can see on their own scoreboard.
+_PILLAR_MISSIONS = {
+    "damage": {
+        "title": "Raise your damage output",
+        "why": "Damage per round is the single biggest gap between lobby-topping players and the rest (207 vs 133 per round).",
+        "goal": "Average 140+ damage per round in your next {n} matches",
+        "how": "Fire at every viable target even when you don't get the kill — chip damage sets up your team. Stop saving when a rifle fight is winnable.",
+    },
+    "survival": {
+        "title": "Live past the fight",
+        "why": "Players survive 53% of rounds they win and 1% of rounds they lose — staying alive IS winning.",
+        "goal": "Survive 30%+ of rounds in your next {n} matches",
+        "how": "After getting a kill, reposition instead of holding the same angle. When you're last alive on a lost round, save the weapon.",
+    },
+    "impact": {
+        "title": "Create round-swinging moments",
+        "why": "Opening kills and multikill rounds decide rounds more than steady trading.",
+        "goal": "Take (and win) an opening duel or land a multikill in half your rounds over the next {n} matches",
+        "how": "Coordinate your entry with utility — swing when the flash pops, not after. On defense, take one confident first contact instead of waiting.",
+    },
+    "precision": {
+        "title": "Sharpen your first bullet",
+        "why": "Lobby-topping players hold ~32% headshots vs ~29% for the rest — small edge, every fight.",
+        "goal": "Hold 28%+ headshot rate over your next {n} matches",
+        "how": "Crosshair at head level while moving through the map, always. 10 minutes of Deathmatch aiming ONLY for heads before ranked.",
+    },
+}
+
+
+def build_otr_mission(otr_profile: dict, n_matches: int = 5) -> dict:
+    """The single weak-pillar mission for the player's current window."""
+    weakest = otr_profile["weakest_pillar"]
+    t = _PILLAR_MISSIONS[weakest]
+    return {
+        "pillar": weakest,
+        "pillar_score": otr_profile["pillars"][weakest],
+        "title": t["title"],
+        "why": t["why"],
+        "goal": t["goal"].format(n=n_matches),
+        "how": t["how"],
+        "matches": n_matches,
+    }
+
+
+def build_weekly_recap(otr_profile: dict, transition: dict | None = None) -> dict | None:
+    """Shareable recap over the last OTR window vs the one before it.
+
+    Returns None until there are enough matches for a before/after story.
+    """
+    if otr_profile.get("otr_previous") is None:
+        return None
+    matches = otr_profile["matches"]
+    window = matches[-OTR_WINDOW:]
+    prev = matches[-2 * OTR_WINDOW : -OTR_WINDOW] or matches[:-OTR_WINDOW]
+
+    def _pillar_delta(p):
+        cur = sum(m["pillars"][p] for m in window) / len(window)
+        old = sum(m["pillars"][p] for m in prev) / len(prev)
+        return round(cur - old, 1)
+
+    deltas = {p: _pillar_delta(p) for p in OTR_WEIGHTS}
+    best = max(deltas, key=deltas.get)
+    wins = sum(1 for m in window if m["won"])
+    recap = {
+        "otr": otr_profile["otr"],
+        "otr_delta": round(otr_profile["otr"] - otr_profile["otr_previous"], 1),
+        "trend": otr_profile["trend"],
+        "record": f"{wins}W-{len(window) - wins}L",
+        "best_pillar_gain": {"pillar": best, "delta": deltas[best]} if deltas[best] > 0 else None,
+        "best_match": max(window, key=lambda m: m["otr"]),
+    }
+    if transition:
+        recap["rank_change"] = (
+            f"{transition['from_tier_name']} → {transition['to_tier_name']}"
+        )
+    return recap
