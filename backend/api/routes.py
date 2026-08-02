@@ -46,7 +46,7 @@ from api.queries import (
     get_duel_strength_profile,
     get_otr_profile,
     get_otr_percentile,
-    build_otr_mission,
+    get_mission_state,
     build_weekly_recap,
 )
 from api.auth_utils import hash_password, verify_password, generate_jwt, verify_jwt
@@ -1402,6 +1402,7 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
                         profile["duel_strength"] = duels
                     otr = get_otr_profile(conn, puuid)
                     if otr:
+                        mission_state = get_mission_state(conn, puuid, otr)
                         # Keep the prompt lean: headline + pillars + mission,
                         # not the full per-match list.
                         profile["otr"] = {
@@ -1410,7 +1411,8 @@ async def coaching_chat(request: Request, req: CoachingQuestion, user: dict = De
                             "trend": otr["trend"],
                             "pillars": otr["pillars"],
                             "weakest_pillar": otr["weakest_pillar"],
-                            "mission": build_otr_mission(otr),
+                            "mission": (mission_state or {}).get("active"),
+                            "mission_stats": (mission_state or {}).get("stats"),
                         }
                     match_context = _resolve_match_context(conn, puuid, req.question)
             finally:
@@ -1569,6 +1571,7 @@ async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_
             }
         transition = detect_rank_transition(conn, puuid)
         percentile = get_otr_percentile(conn, puuid, profile["otr"])
+        mission_state = get_mission_state(conn, puuid, profile)
     finally:
         conn.close()
 
@@ -1576,8 +1579,72 @@ async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_
         "available": True,
         **profile,
         "percentile": percentile,
-        "mission": build_otr_mission(profile),
+        "mission": (mission_state or {}).get("active"),
+        "mission_resolved": (mission_state or {}).get("last_resolved"),
+        "mission_stats": (mission_state or {}).get("stats"),
         "recap": build_weekly_recap(profile, transition),
         "rank_transition": transition,
     }
+
+
+@app.get("/api/v1/player/{riot_id}/briefing")
+@limiter.limit("30/minute")
+async def get_briefing(request: Request, riot_id: str, user: dict = Depends(get_current_user)):
+    """One coach paragraph for today's landing: what moved, what tonight is
+    about. Generated once per (player, day, latest-match) and cached, so the
+    dashboard can always show it without paying an LLM call per visit."""
+    name, tag = _split_riot_id(riot_id)
+    conn = _connect()
+    try:
+        puuid = resolve_puuid(conn, name, tag)
+        if not puuid:
+            raise HTTPException(status_code=404, detail=f"No ingested data for {riot_id}.")
+        profile = get_otr_profile(conn, puuid)
+        if not profile:
+            return {"available": False}
+        mission_state = get_mission_state(conn, puuid, profile)
+        transition = detect_rank_transition(conn, puuid)
+    finally:
+        conn.close()
+
+    # Cache key includes the latest match so a fresh session regenerates.
+    last_match = profile["matches"][-1]["match_id"] if profile["matches"] else "none"
+    day = time.strftime("%Y-%m-%d")
+    cache_key = f"briefing:{puuid}:{day}:{last_match}"
+    cached = get_cache_value(cache_key)
+    if cached:
+        return {"available": True, "briefing": cached, "cached": True}
+
+    active = (mission_state or {}).get("active") or {}
+    resolved = (mission_state or {}).get("last_resolved")
+    stats = (mission_state or {}).get("stats") or {}
+    recent = profile["matches"][-3:]
+    facts = f"""Player: {name}#{tag}
+OTR (last 10, 50 = lobby average): {profile['otr']} | trend: {profile['trend']} (moves inside ±3 are noise)
+Pillars: {profile['pillars']} | weakest: {profile['weakest_pillar']}
+Active mission: {active.get('goal', 'none')} — progress {active.get('matches_played', 0)}/{active.get('target_matches', 5)} matches, current avg {active.get('current_score')} vs target {active.get('target')}, on_track: {active.get('on_track')}
+Just resolved mission: {f"{resolved['status'].upper()} — final {resolved.get('final_score')} vs target {resolved['target']}" if resolved else 'none'}
+Mission record: {stats.get('completed', 0)} completed, streak {stats.get('streak', 0)}
+Recent matches: {[f"{m['map']} {'W' if m['won'] else 'L'} OTR {m['otr']}" for m in recent]}
+Rank change: {f"{transition['from_tier_name']} -> {transition['to_tier_name']}, {transition['matches_since']} matches ago" if transition else 'none recent'}"""
+
+    messages = [
+        {"role": "system", "content": (
+            "You are OneTap AI's daily coach. Write a 3-4 sentence briefing for the player's "
+            "dashboard, speaking directly to them. Rules: reference ONLY the facts given; "
+            "if a mission just resolved, lead with that (celebrate a completion, reframe a "
+            "failure as data); otherwise lead with the most meaningful change; end with what "
+            "tonight is about (the active mission). Never call an OTR move inside ±3 a trend. "
+            "No greetings, no fluff, no markdown headers."
+        )},
+        {"role": "user", "content": facts},
+    ]
+    try:
+        text = await asyncio.to_thread(llm.generate_coaching_response, messages)
+    except Exception as e:  # noqa: BLE001 — a briefing is never worth a 5xx
+        print(f"Briefing generation failed: {e}")
+        return {"available": False}
+
+    set_cache_value(cache_key, text, ttl=86400)
+    return {"available": True, "briefing": text, "cached": False}
 

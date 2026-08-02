@@ -1621,49 +1621,208 @@ def get_otr_percentile(
     }
 
 
-# Mission templates per pillar: concrete, checkable next-N-matches targets.
-# Thresholds are lobby-relative in spirit but phrased in absolute terms the
-# player can see on their own scoreboard.
+# ── Missions: assigned, played, GRADED ───────────────────────────────────
+# A mission is a checkable contract: "lift your weakest pillar to <target>
+# average over your next N ranked matches". It persists in player_missions,
+# fills a progress bar as matches land, resolves to completed/failed at N
+# matches, and immediately assigns the next one. The graded metric is the
+# lobby-relative pillar score (not a raw stat), so a mission can't be
+# completed or failed by lobby luck.
 _PILLAR_MISSIONS = {
     "damage": {
         "title": "Raise your damage output",
         "why": "Damage per round is the single biggest gap between lobby-topping players and the rest (207 vs 133 per round).",
-        "goal": "Average 140+ damage per round in your next {n} matches",
         "how": "Fire at every viable target even when you don't get the kill — chip damage sets up your team. Stop saving when a rifle fight is winnable.",
     },
     "survival": {
         "title": "Live past the fight",
         "why": "Players survive 53% of rounds they win and 1% of rounds they lose — staying alive IS winning.",
-        "goal": "Survive 30%+ of rounds in your next {n} matches",
         "how": "After getting a kill, reposition instead of holding the same angle. When you're last alive on a lost round, save the weapon.",
     },
     "impact": {
         "title": "Create round-swinging moments",
         "why": "Opening kills and multikill rounds decide rounds more than steady trading.",
-        "goal": "Take (and win) an opening duel or land a multikill in half your rounds over the next {n} matches",
         "how": "Coordinate your entry with utility — swing when the flash pops, not after. On defense, take one confident first contact instead of waiting.",
     },
     "precision": {
         "title": "Sharpen your first bullet",
         "why": "Lobby-topping players hold ~32% headshots vs ~29% for the rest — small edge, every fight.",
-        "goal": "Hold 28%+ headshot rate over your next {n} matches",
         "how": "Crosshair at head level while moving through the map, always. 10 minutes of Deathmatch aiming ONLY for heads before ranked.",
     },
 }
 
+_MISSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS player_missions (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    puuid           CHAR(78)        NOT NULL,
+    pillar          VARCHAR(12)     NOT NULL,
+    baseline_score  TINYINT UNSIGNED NOT NULL,
+    target_score    TINYINT UNSIGNED NOT NULL,
+    target_matches  TINYINT UNSIGNED NOT NULL DEFAULT 5,
+    assigned_after  TIMESTAMP       NOT NULL COMMENT 'grade matches started after this',
+    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status          ENUM('active','completed','failed') NOT NULL DEFAULT 'active',
+    resolved_at     TIMESTAMP       NULL,
+    final_score     TINYINT UNSIGNED NULL,
+    PRIMARY KEY (id),
+    INDEX idx_pm_player (puuid, status, created_at)
+) ENGINE=InnoDB
+"""
 
-def build_otr_mission(otr_profile: dict, n_matches: int = 5) -> dict:
-    """The single weak-pillar mission for the player's current window."""
+
+def _mission_target(baseline: int) -> int:
+    """Personalized, reachable target: +4 pillar points, kept inside a sane
+    band so weak starts aren't demoralizing and strong starts stay earnable."""
+    return max(48, min(68, baseline + 4))
+
+
+def _assign_mission(cur, puuid: str, otr_profile: dict, target_matches: int) -> None:
     weakest = otr_profile["weakest_pillar"]
-    t = _PILLAR_MISSIONS[weakest]
+    baseline = int(otr_profile["pillars"][weakest])
+    last_played = otr_profile["matches"][-1]["started_at"] if otr_profile["matches"] else None
+    cur.execute(
+        """
+        INSERT INTO player_missions
+            (puuid, pillar, baseline_score, target_score, target_matches, assigned_after)
+        VALUES (%s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+        """,
+        (puuid, weakest, baseline, _mission_target(baseline), target_matches, last_played),
+    )
+
+
+def _mission_payload(row: dict, window: list[dict]) -> dict:
+    pillar = row["pillar"]
+    t = _PILLAR_MISSIONS.get(pillar, {})
+    current = (
+        round(sum(m["pillars"][pillar] for m in window) / len(window))
+        if window else None
+    )
     return {
-        "pillar": weakest,
-        "pillar_score": otr_profile["pillars"][weakest],
-        "title": t["title"],
-        "why": t["why"],
-        "goal": t["goal"].format(n=n_matches),
-        "how": t["how"],
-        "matches": n_matches,
+        "pillar": pillar,
+        "title": t.get("title", pillar),
+        "why": t.get("why", ""),
+        "how": t.get("how", ""),
+        "goal": (
+            f"Lift your {pillar} pillar to a {int(row['target_score'])}+ average "
+            f"over your next {int(row['target_matches'])} ranked matches"
+        ),
+        "baseline": int(row["baseline_score"]),
+        "target": int(row["target_score"]),
+        "target_matches": int(row["target_matches"]),
+        "matches_played": len(window),
+        "current_score": current,
+        "on_track": current is not None and current >= int(row["target_score"]),
+        "status": row["status"],
+    }
+
+
+def get_mission_state(
+    conn,
+    puuid: str,
+    otr_profile: dict,
+    target_matches: int = 5,
+) -> dict | None:
+    """The mission loop: assign → track → grade → celebrate → reassign.
+
+    Returns {"active": <mission>, "last_resolved": <mission|None>,
+    "stats": {completed, failed, streak}}. Idempotent per call; resolution
+    happens the first time enough post-assignment matches exist.
+    """
+    if not otr_profile or not otr_profile.get("matches"):
+        return None
+
+    matches = otr_profile["matches"]  # chronological, ISO started_at
+
+    with conn.cursor() as cur:
+        cur.execute(_MISSIONS_DDL)
+
+        cur.execute(
+            "SELECT * FROM player_missions WHERE puuid = %s AND status = 'active' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (puuid,),
+        )
+        active = cur.fetchone()
+
+        if not active:
+            _assign_mission(cur, puuid, otr_profile, target_matches)
+            conn.commit()
+            cur.execute(
+                "SELECT * FROM player_missions WHERE puuid = %s AND status = 'active' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (puuid,),
+            )
+            active = cur.fetchone()
+
+        # Matches that count toward this mission: started after assignment.
+        cutoff = active["assigned_after"]
+        cutoff_iso = cutoff.isoformat() if isinstance(cutoff, datetime) else str(cutoff)
+        window = [m for m in matches if str(m["started_at"]) > cutoff_iso]
+        window = window[: int(active["target_matches"])]
+
+        last_resolved = None
+        if len(window) >= int(active["target_matches"]):
+            pillar = active["pillar"]
+            final = round(sum(m["pillars"][pillar] for m in window) / len(window))
+            status = "completed" if final >= int(active["target_score"]) else "failed"
+            cur.execute(
+                "UPDATE player_missions SET status = %s, final_score = %s, resolved_at = NOW() "
+                "WHERE id = %s",
+                (status, final, active["id"]),
+            )
+            last_resolved = _mission_payload({**active, "status": status}, window)
+            last_resolved["final_score"] = final
+            _assign_mission(cur, puuid, otr_profile, target_matches)
+            conn.commit()
+            cur.execute(
+                "SELECT * FROM player_missions WHERE puuid = %s AND status = 'active' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (puuid,),
+            )
+            active = cur.fetchone()
+            window = []
+        else:
+            # Surface the most recent resolution once more if it's fresh (the
+            # player may not have seen it yet); frontend decides how to show it.
+            cur.execute(
+                "SELECT * FROM player_missions WHERE puuid = %s AND status != 'active' "
+                "AND resolved_at >= NOW() - INTERVAL 2 DAY "
+                "ORDER BY resolved_at DESC LIMIT 1",
+                (puuid,),
+            )
+            recent = cur.fetchone()
+            if recent:
+                last_resolved = _mission_payload(recent, [])
+                last_resolved["final_score"] = (
+                    int(recent["final_score"]) if recent["final_score"] is not None else None
+                )
+
+        # Identity stats: what the player has accumulated.
+        cur.execute(
+            "SELECT status, COUNT(*) n FROM player_missions "
+            "WHERE puuid = %s AND status != 'active' GROUP BY status",
+            (puuid,),
+        )
+        counts = {r["status"]: int(r["n"]) for r in cur.fetchall()}
+        cur.execute(
+            "SELECT status FROM player_missions WHERE puuid = %s AND status != 'active' "
+            "ORDER BY resolved_at DESC LIMIT 20",
+            (puuid,),
+        )
+        streak = 0
+        for r in cur.fetchall():
+            if r["status"] == "completed":
+                streak += 1
+            else:
+                break
+
+    return {
+        "active": _mission_payload(active, window),
+        "last_resolved": last_resolved,
+        "stats": {
+            "completed": counts.get("completed", 0),
+            "failed": counts.get("failed", 0),
+            "streak": streak,
+        },
     }
 
 

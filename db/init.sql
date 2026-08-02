@@ -246,6 +246,26 @@ CREATE TABLE IF NOT EXISTS coaching_feedback (
 ) ENGINE=InnoDB;
 
 -- ----------------------------------------------------------------
+-- Player Missions (assigned → tracked → graded → reassigned)
+-- ----------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS player_missions (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    puuid           CHAR(78)        NOT NULL,
+    pillar          VARCHAR(12)     NOT NULL COMMENT 'damage|survival|impact|precision',
+    baseline_score  TINYINT UNSIGNED NOT NULL COMMENT 'pillar avg at assignment',
+    target_score    TINYINT UNSIGNED NOT NULL,
+    target_matches  TINYINT UNSIGNED NOT NULL DEFAULT 5,
+    assigned_after  TIMESTAMP       NOT NULL COMMENT 'grade matches started after this',
+    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status          ENUM('active','completed','failed') NOT NULL DEFAULT 'active',
+    resolved_at     TIMESTAMP       NULL,
+    final_score     TINYINT UNSIGNED NULL,
+    PRIMARY KEY (id),
+    INDEX idx_pm_player (puuid, status, created_at)
+) ENGINE=InnoDB;
+
+-- ----------------------------------------------------------------
 -- Economy Classification View
 -- ----------------------------------------------------------------
 

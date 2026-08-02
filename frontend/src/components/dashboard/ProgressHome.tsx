@@ -1,8 +1,9 @@
 "use client";
 
-import { TrendingUp, TrendingDown, Minus, Crosshair, Shield, Zap, Target, ArrowUpRight, Flame } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { TrendingUp, TrendingDown, Minus, Crosshair, Shield, Zap, Target, ArrowUpRight, Flame, CheckCircle2, XCircle, Sparkles } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import { ProgressResponse, PillarKey, OtrMatch } from '@/lib/api';
+import { ProgressResponse, PillarKey, OtrMatch, fetchBriefing } from '@/lib/api';
 import { Panel, SectionTitle } from './primitives';
 
 const PILLAR_META: Record<PillarKey, { label: string; icon: typeof Crosshair; blurb: string }> = {
@@ -43,6 +44,16 @@ const OtrTooltip = ({ active, payload }: any) => {
 };
 
 export default function ProgressHome({ progress, riotId }: { progress: ProgressResponse; riotId: string }) {
+  const [briefing, setBriefing] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchBriefing(riotId)
+      .then((b) => { if (!cancelled && b.available && b.briefing) setBriefing(b.briefing); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [riotId]);
+
   if (!progress.available || progress.otr == null) {
     return (
       <Panel className="p-8 text-center">
@@ -54,13 +65,56 @@ export default function ProgressHome({ progress, riotId }: { progress: ProgressR
     );
   }
 
-  const { otr, otr_previous, trend, pillars, weakest_pillar, mission, percentile, recap, matches = [] } = progress;
+  const { otr, otr_previous, trend, pillars, weakest_pillar, mission, mission_resolved, mission_stats, percentile, recap, matches = [] } = progress;
   const tb = trendBadge(trend);
   const TrendIcon = tb.icon;
   const delta = otr_previous != null ? +(otr - otr_previous).toFixed(1) : null;
 
   return (
     <div className="space-y-4">
+      {/* ── DAILY BRIEFING: the coach noticed you logged in ── */}
+      {briefing && (
+        <Panel className="px-6 py-4 border-brand-blue/20">
+          <div className="flex items-start gap-3">
+            <Sparkles size={15} className="text-brand-blue mt-0.5 flex-shrink-0" />
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-brand-blue/80 mb-1">
+                Today&apos;s Briefing
+              </div>
+              <p className="text-sm text-white/85 leading-relaxed">{briefing}</p>
+            </div>
+          </div>
+        </Panel>
+      )}
+
+      {/* ── MISSION RESOLVED: closure — the moment that builds the habit ── */}
+      {mission_resolved && (
+        <Panel className={`px-6 py-4 ${mission_resolved.status === 'completed' ? 'border-emerald-500/30' : 'border-amber-500/25'}`}>
+          <div className="flex flex-wrap items-center gap-3">
+            {mission_resolved.status === 'completed' ? (
+              <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
+            ) : (
+              <XCircle size={18} className="text-amber-400 flex-shrink-0" />
+            )}
+            <div className="flex-1 min-w-[220px]">
+              <span className={`text-[10px] font-black uppercase tracking-widest ${mission_resolved.status === 'completed' ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {mission_resolved.status === 'completed' ? 'Mission complete' : 'Mission missed — good data'}
+              </span>
+              <p className="text-sm text-white/85 mt-0.5">
+                {mission_resolved.title}: finished at{' '}
+                <span className="font-black tabular-nums">{mission_resolved.final_score ?? '—'}</span>
+                {' '}vs target <span className="font-black tabular-nums">{mission_resolved.target}</span>
+                {mission_resolved.status !== 'completed' && ' — the next one recalibrates to where you are now.'}
+              </p>
+            </div>
+            {mission_stats && mission_stats.streak > 1 && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.07] text-emerald-400 text-xs font-black">
+                <Flame size={13} /> {mission_stats.streak} in a row
+              </span>
+            )}
+          </div>
+        </Panel>
+      )}
       {/* ── HERO: the number they come back for ── */}
       <section className="grid gap-4 lg:grid-cols-3">
         <Panel glow="red" className="lg:col-span-2 p-6">
@@ -120,18 +174,52 @@ export default function ProgressHome({ progress, riotId }: { progress: ProgressR
           </div>
         </Panel>
 
-        {/* ── MISSION: the reason to play tonight ── */}
+        {/* ── MISSION: assigned, tracked, GRADED ── */}
         <Panel glow="blue" className="p-6 flex flex-col">
-          <div className="flex items-center gap-2 mb-3">
-            <Flame size={14} className="text-brand-red" />
-            <span className="text-[10px] font-black uppercase tracking-widest text-white/80">Today&apos;s Mission</span>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Flame size={14} className="text-brand-red" />
+              <span className="text-[10px] font-black uppercase tracking-widest text-white/80">Active Mission</span>
+            </div>
+            {mission_stats && (mission_stats.completed > 0 || mission_stats.streak > 0) && (
+              <span className="text-[10px] font-bold text-muted tabular-nums">
+                {mission_stats.completed} done
+                {mission_stats.streak > 1 && <span className="text-emerald-400"> · {mission_stats.streak}🔥</span>}
+              </span>
+            )}
           </div>
           {mission ? (
             <>
               <h3 className="text-lg font-black text-white leading-tight">{mission.title}</h3>
               <p className="mt-2 text-xs font-bold text-brand-blue leading-relaxed">{mission.goal}</p>
-              <p className="mt-3 text-[11px] text-muted leading-relaxed flex-1">{mission.how}</p>
-              <div className="mt-4 pt-3 border-t border-line/40 text-[10px] text-muted/70 leading-relaxed">
+
+              {/* Progress: n/N matches played, current avg vs target */}
+              <div className="mt-4">
+                <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider mb-1.5">
+                  <span className="text-muted">{mission.matches_played}/{mission.target_matches} matches</span>
+                  {mission.current_score != null && (
+                    <span className={mission.on_track ? 'text-emerald-400' : 'text-amber-400'}>
+                      avg {mission.current_score} / {mission.target}
+                      {mission.on_track ? ' · on track' : ''}
+                    </span>
+                  )}
+                </div>
+                <div className="flex gap-1.5">
+                  {Array.from({ length: mission.target_matches }, (_, i) => (
+                    <div
+                      key={i}
+                      className={`h-2 flex-1 rounded-full transition-all duration-500 ${
+                        i < mission.matches_played
+                          ? mission.on_track ? 'bg-emerald-400' : 'bg-amber-400'
+                          : 'bg-white/[0.07]'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <p className="mt-4 text-[11px] text-muted leading-relaxed flex-1">{mission.how}</p>
+              <div className="mt-3 pt-3 border-t border-line/40 text-[10px] text-muted/70 leading-relaxed">
                 <span className="text-white/60 font-bold uppercase tracking-wider">Why it matters: </span>
                 {mission.why}
               </div>

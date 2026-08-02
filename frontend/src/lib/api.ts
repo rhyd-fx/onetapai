@@ -357,12 +357,24 @@ export interface OtrMatch {
 
 export interface OtrMission {
   pillar: PillarKey;
-  pillar_score: number;
   title: string;
   why: string;
-  goal: string;
   how: string;
-  matches: number;
+  goal: string;
+  baseline: number;
+  target: number;
+  target_matches: number;
+  matches_played: number;
+  current_score: number | null;
+  on_track: boolean;
+  status: 'active' | 'completed' | 'failed';
+  final_score?: number | null;
+}
+
+export interface MissionStats {
+  completed: number;
+  failed: number;
+  streak: number;
 }
 
 export interface OtrRecap {
@@ -387,7 +399,9 @@ export interface ProgressResponse {
   pillars?: Record<PillarKey, number>;
   weakest_pillar?: PillarKey;
   percentile?: { percentile: number; cohort_size: number; cohort_rank_name: string } | null;
-  mission?: OtrMission;
+  mission?: OtrMission | null;
+  mission_resolved?: OtrMission | null;
+  mission_stats?: MissionStats | null;
   recap?: OtrRecap | null;
   rank_transition?: {
     direction: string;
@@ -407,6 +421,21 @@ export async function fetchProgress(riotId: string, lastN = 30): Promise<Progres
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `Request failed (${res.status})`);
   }
+  return res.json();
+}
+
+export interface BriefingResponse {
+  available: boolean;
+  briefing?: string;
+  cached?: boolean;
+}
+
+export async function fetchBriefing(riotId: string): Promise<BriefingResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/v1/player/${encodeURIComponent(riotId)}/briefing`,
+    { headers: getHeaders() }
+  );
+  if (!res.ok) return { available: false };
   return res.json();
 }
 
