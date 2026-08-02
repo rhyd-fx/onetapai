@@ -403,6 +403,18 @@ export interface ProgressResponse {
   mission_resolved?: OtrMission | null;
   mission_stats?: MissionStats | null;
   recap?: OtrRecap | null;
+  checkin?: { current: number; best: number; total: number } | null;
+  journey?: {
+    start_tier_name: string;
+    current_tier_name: string;
+    peak_tier_name: string;
+    goal_tier_name: string;
+    subtiers_climbed: number;
+    subtiers_to_goal: number;
+    goal_total_subtiers: number;
+    at_peak: boolean;
+    goal_reached: boolean;
+  } | null;
   rank_transition?: {
     direction: string;
     from_tier_name: string;

@@ -1826,6 +1826,101 @@ def get_mission_state(
     }
 
 
+# ── Check-in streaks ─────────────────────────────────────────────────────
+# Effort-based accumulation: streaks reward SHOWING UP, never performance —
+# a bad night can't break one, only absence can. Recorded when a user loads
+# their own progress view.
+_CHECKINS_DDL = """
+CREATE TABLE IF NOT EXISTS user_checkins (
+    user_id     INT UNSIGNED NOT NULL,
+    day         DATE         NOT NULL,
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, day)
+) ENGINE=InnoDB
+"""
+
+
+def record_checkin(conn, user_id: int) -> dict:
+    """Record today's check-in (idempotent) and return streak stats.
+
+    current: consecutive days ending today. best: longest run ever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_CHECKINS_DDL)
+        cur.execute(
+            "INSERT IGNORE INTO user_checkins (user_id, day) VALUES (%s, CURDATE())",
+            (user_id,),
+        )
+        conn.commit()
+        cur.execute(
+            "SELECT day FROM user_checkins WHERE user_id = %s ORDER BY day DESC LIMIT 400",
+            (user_id,),
+        )
+        days = [r["day"] for r in cur.fetchall()]
+
+    if not days:
+        return {"current": 0, "best": 0, "total": 0}
+
+    # Current streak: walk back from the newest day (today) in 1-day steps.
+    current = 1
+    for prev, nxt in zip(days, days[1:]):
+        if (prev - nxt).days == 1:
+            current += 1
+        else:
+            break
+
+    # Best streak across the fetched history.
+    best = run = 1
+    for prev, nxt in zip(days, days[1:]):
+        run = run + 1 if (prev - nxt).days == 1 else 1
+        best = max(best, run)
+
+    return {"current": current, "best": max(best, current), "total": len(days)}
+
+
+def get_rank_journey(conn, puuid: str) -> dict | None:
+    """The player's climb: where they started with us, where they are, the
+    road ahead. Goal = start + 5 full ranks (15 subtiers), capped at Radiant.
+
+    The coaching line is honest about what the data supports: sustained
+    lobby-beating play (OTR 55+) is what climbs — we never promise RR math.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT CAST(pms.tier_id AS SIGNED) AS tier, m.started_at
+            FROM player_match_stats pms
+            JOIN matches m ON m.match_id = pms.match_id
+            WHERE pms.puuid = %s AND pms.tier_id > 0
+              AND m.game_mode IN ('Competitive', 'Premier')
+            ORDER BY m.started_at
+            """,
+            (puuid,),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+
+    start = int(rows[0]["tier"])
+    current = int(rows[-1]["tier"])
+    peak = max(int(r["tier"]) for r in rows)
+    goal = min(27, start + 15)
+    climbed = current - start
+    to_goal = goal - current
+
+    return {
+        "start_tier_name": _tier_name(start),
+        "current_tier_name": _tier_name(current),
+        "peak_tier_name": _tier_name(peak),
+        "goal_tier_name": _tier_name(goal),
+        "subtiers_climbed": climbed,
+        "subtiers_to_goal": max(0, to_goal),
+        "goal_total_subtiers": goal - start,
+        "at_peak": current == peak,
+        "goal_reached": current >= goal,
+    }
+
+
 def build_weekly_recap(otr_profile: dict, transition: dict | None = None) -> dict | None:
     """Shareable recap over the last OTR window vs the one before it.
 

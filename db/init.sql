@@ -266,6 +266,17 @@ CREATE TABLE IF NOT EXISTS player_missions (
 ) ENGINE=InnoDB;
 
 -- ----------------------------------------------------------------
+-- Daily Check-ins (effort streaks — absence breaks them, bad games don't)
+-- ----------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS user_checkins (
+    user_id     INT UNSIGNED NOT NULL,
+    day         DATE         NOT NULL,
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, day)
+) ENGINE=InnoDB;
+
+-- ----------------------------------------------------------------
 -- Economy Classification View
 -- ----------------------------------------------------------------
 

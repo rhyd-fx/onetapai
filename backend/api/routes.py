@@ -48,6 +48,8 @@ from api.queries import (
     get_otr_percentile,
     get_mission_state,
     build_weekly_recap,
+    record_checkin,
+    get_rank_journey,
 )
 from api.auth_utils import hash_password, verify_password, generate_jwt, verify_jwt
 from rag.retriever import CoachingRetriever
@@ -1556,22 +1558,37 @@ async def get_economy_impact(riot_id: str, last_n: int = 20, user: dict = Depend
 async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_current_user)):
     """The daily progress tracker: OneTap Rating (lobby-relative, so already
     rank- and smurf-adjusted), pillar breakdown, rank-cohort percentile, the
-    current weak-pillar mission, and a shareable recap."""
+    graded mission loop, check-in streak, and the rank journey."""
     name, tag = _split_riot_id(riot_id)
     conn = _connect()
     try:
         puuid = resolve_puuid(conn, name, tag)
         if not puuid:
             raise HTTPException(status_code=404, detail=f"No ingested data for {riot_id}.")
+
+        # A check-in is "I looked at MY OWN progress today" — scouting someone
+        # else doesn't count. Never let streak bookkeeping break the page.
+        checkin = None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT linked_riot_id FROM users WHERE id = %s", (user.get("user_id"),))
+                row = cur.fetchone()
+            if row and row.get("linked_riot_id") == riot_id:
+                checkin = record_checkin(conn, int(user["user_id"]))
+        except Exception as e:  # noqa: BLE001
+            print(f"check-in failed for user {user.get('user_id')}: {e}")
+
         profile = get_otr_profile(conn, puuid, match_limit=last_n)
         if not profile:
             return {
                 "available": False,
                 "reason": "No scored ranked matches yet — play a Competitive match and re-sync.",
+                "checkin": checkin,
             }
         transition = detect_rank_transition(conn, puuid)
         percentile = get_otr_percentile(conn, puuid, profile["otr"])
         mission_state = get_mission_state(conn, puuid, profile)
+        journey = get_rank_journey(conn, puuid)
     finally:
         conn.close()
 
@@ -1584,6 +1601,8 @@ async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_
         "mission_stats": (mission_state or {}).get("stats"),
         "recap": build_weekly_recap(profile, transition),
         "rank_transition": transition,
+        "checkin": checkin,
+        "journey": journey,
     }
 
 

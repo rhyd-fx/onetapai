@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { TrendingUp, TrendingDown, Minus, Crosshair, Shield, Zap, Target, ArrowUpRight, Flame, CheckCircle2, XCircle, Sparkles } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Crosshair, Shield, Zap, Target, ArrowUpRight, Flame, CheckCircle2, XCircle, Sparkles, Mountain } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { ProgressResponse, PillarKey, OtrMatch, fetchBriefing } from '@/lib/api';
 import { Panel, SectionTitle } from './primitives';
@@ -65,13 +65,58 @@ export default function ProgressHome({ progress, riotId }: { progress: ProgressR
     );
   }
 
-  const { otr, otr_previous, trend, pillars, weakest_pillar, mission, mission_resolved, mission_stats, percentile, recap, matches = [] } = progress;
+  const { otr, otr_previous, trend, pillars, weakest_pillar, mission, mission_resolved, mission_stats, percentile, recap, matches = [], checkin, journey } = progress;
   const tb = trendBadge(trend);
   const TrendIcon = tb.icon;
   const delta = otr_previous != null ? +(otr - otr_previous).toFixed(1) : null;
 
   return (
     <div className="space-y-4">
+      {/* ── RANK JOURNEY: the road, not just today ── */}
+      {journey && (
+        <Panel className="px-6 py-4">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Mountain size={15} className="text-brand-red flex-shrink-0" />
+              <span className="text-[10px] font-black uppercase tracking-widest text-white/80 whitespace-nowrap">
+                Rank Journey
+              </span>
+            </div>
+            <div className="flex-1 min-w-[240px]">
+              <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-muted mb-1.5">
+                <span>{journey.start_tier_name}</span>
+                <span className="text-white/90">
+                  {journey.goal_reached
+                    ? '🏆 Goal reached — new road unlocks soon'
+                    : `${journey.current_tier_name} · ${journey.subtiers_to_goal} steps to go`}
+                </span>
+                <span className="text-brand-blue">{journey.goal_tier_name}</span>
+              </div>
+              <div className="relative h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-brand-red to-brand-blue transition-all duration-700"
+                  style={{
+                    width: `${Math.min(100, Math.max(3, (journey.subtiers_climbed / Math.max(1, journey.goal_total_subtiers)) * 100))}%`,
+                  }}
+                />
+              </div>
+            </div>
+            {checkin && checkin.current > 0 && (
+              <span
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-black whitespace-nowrap ${
+                  checkin.current > 1
+                    ? 'border-brand-red/30 bg-brand-red/[0.07] text-brand-red-soft'
+                    : 'border-white/10 bg-white/[0.03] text-muted'
+                }`}
+                title={`Best streak: ${checkin.best} days · ${checkin.total} total check-ins`}
+              >
+                <Flame size={13} />
+                {checkin.current}-day streak
+              </span>
+            )}
+          </div>
+        </Panel>
+      )}
       {/* ── DAILY BRIEFING: the coach noticed you logged in ── */}
       {briefing && (
         <Panel className="px-6 py-4 border-brand-blue/20">
