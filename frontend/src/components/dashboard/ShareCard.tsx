@@ -3,6 +3,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { Download, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { DashboardVM } from '@/lib/viewModel';
+import { ProgressResponse, PillarKey } from '@/lib/api';
 
 // NOTE: The hidden export card is styled with INLINE HEX colors (not Tailwind utilities),
 // because Tailwind v4 emits oklch() colors that html2canvas cannot parse.
@@ -10,19 +11,28 @@ import { DashboardVM } from '@/lib/viewModel';
 
 const RED = '#ff4655';
 const BLUE = '#22d3ee';
+const GREEN = '#34d399';
+const AMBER = '#fbbf24';
 const INK = '#05070b';
 const PANEL = '#0b0f15';
 const BORDER = '#1e293b';
 const MUTED = '#94a3b8';
 
+const PILLAR_LABELS: Record<PillarKey, string> = {
+  damage: 'Damage',
+  survival: 'Survival',
+  impact: 'Impact',
+  precision: 'Precision',
+};
+
 function Stat({ label, value, color = '#ffffff' }: { label: string; value: string; color?: string }) {
   return (
-    <div style={{ 
-      flex: 1, 
-      background: PANEL, 
-      border: `1px solid ${BORDER}`, 
-      borderRadius: 20, 
-      padding: '24px 20px', 
+    <div style={{
+      flex: 1,
+      background: PANEL,
+      border: `1px solid ${BORDER}`,
+      borderRadius: 20,
+      padding: '24px 20px',
       textAlign: 'center',
       boxShadow: '0 8px 32px rgba(0,0,0,0.2)'
     }}>
@@ -32,7 +42,7 @@ function Stat({ label, value, color = '#ffffff' }: { label: string; value: strin
   );
 }
 
-export default function ShareCard({ vm }: { vm: DashboardVM }) {
+export default function ShareCard({ vm, progress }: { vm: DashboardVM; progress?: ProgressResponse | null }) {
   const ref = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [mapSplashes, setMapSplashes] = useState<Record<string, string>>({});
@@ -82,6 +92,11 @@ export default function ShareCard({ vm }: { vm: DashboardVM }) {
   const bestMapSplash = mapSplashes[vm.bestMap?.map.toLowerCase() || ''];
   const worstMapSplash = mapSplashes[vm.worstMap?.map.toLowerCase() || ''];
 
+  // The improvement story, when this is the player's own tracked profile.
+  const otr = progress?.available && progress.otr != null ? progress : null;
+  const otrDelta = otr?.recap?.otr_delta ?? null;
+  const streak = otr?.mission_stats?.streak ?? 0;
+
   return (
     <div className="flex flex-col items-center gap-6 w-full">
       {/* Interactive Mockup/Preview of the Share Card */}
@@ -111,22 +126,58 @@ export default function ShareCard({ vm }: { vm: DashboardVM }) {
 
         {/* Mini Stats Grid */}
         <div className="p-3 grid grid-cols-2 gap-2 flex-shrink-0 bg-ink-950/20">
-          <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
-            <div className="text-[8px] font-bold text-muted uppercase tracking-wider">ACS</div>
-            <div className="text-sm font-black text-brand-red mt-0.5">{vm.stats.acs.toFixed(0)}</div>
-          </div>
-          <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
-            <div className="text-[8px] font-bold text-muted uppercase tracking-wider">HS%</div>
-            <div className="text-sm font-black text-brand-red mt-0.5">{vm.stats.hsPct.toFixed(0)}%</div>
-          </div>
-          <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
-            <div className="text-[8px] font-bold text-muted uppercase tracking-wider">K/D</div>
-            <div className="text-sm font-black text-brand-blue mt-0.5">{vm.stats.kd}</div>
-          </div>
-          <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
-            <div className="text-[8px] font-bold text-muted uppercase tracking-wider">WIN RATE</div>
-            <div className="text-sm font-black text-brand-blue mt-0.5">{vm.stats.winRate != null ? `${vm.stats.winRate.toFixed(0)}%` : '—'}</div>
-          </div>
+          {otr ? (
+            <>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">OTR</div>
+                <div className="text-sm font-black text-brand-red mt-0.5">
+                  {otr.otr!.toFixed(1)}
+                  {otrDelta != null && otrDelta !== 0 && (
+                    <span className={`ml-1 text-[9px] ${otrDelta > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {otrDelta > 0 ? '▲' : '▼'}{Math.abs(otrDelta).toFixed(1)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">Percentile</div>
+                <div className="text-sm font-black text-brand-blue mt-0.5">
+                  {otr.percentile ? `Top ${Math.max(1, 100 - otr.percentile.percentile)}%` : '—'}
+                </div>
+              </div>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">Journey</div>
+                <div className="text-[10px] font-black text-white mt-1 truncate">
+                  {otr.journey ? `${otr.journey.start_tier_name} → ${otr.journey.current_tier_name}` : '—'}
+                </div>
+              </div>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">Missions</div>
+                <div className="text-sm font-black text-emerald-400 mt-0.5">
+                  {streak > 1 ? `${streak}🔥` : otr.mission_stats?.completed ?? 0}
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">ACS</div>
+                <div className="text-sm font-black text-brand-red mt-0.5">{vm.stats.acs.toFixed(0)}</div>
+              </div>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">HS%</div>
+                <div className="text-sm font-black text-brand-red mt-0.5">{vm.stats.hsPct.toFixed(0)}%</div>
+              </div>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">K/D</div>
+                <div className="text-sm font-black text-brand-blue mt-0.5">{vm.stats.kd}</div>
+              </div>
+              <div className="bg-ink-900/60 border border-white/5 rounded-lg p-2 text-center">
+                <div className="text-[8px] font-bold text-muted uppercase tracking-wider">WIN RATE</div>
+                <div className="text-sm font-black text-brand-blue mt-0.5">{vm.stats.winRate != null ? `${vm.stats.winRate.toFixed(0)}%` : '—'}</div>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Mini Maps Grid */}
@@ -261,15 +312,152 @@ export default function ShareCard({ vm }: { vm: DashboardVM }) {
             boxSizing: 'border-box' 
           }}>
             
-            {/* Stats Grid row */}
-            <div style={{ display: 'flex', gap: 24 }}>
-              <Stat label="ACS" value={vm.stats.acs.toFixed(0)} color={RED} />
-              <Stat label="HS%" value={`${vm.stats.hsPct.toFixed(0)}%`} color={RED} />
-              <Stat label="K/D" value={vm.stats.kd} color={BLUE} />
-              <Stat label="Win Rate" value={vm.stats.winRate != null ? `${vm.stats.winRate.toFixed(0)}%` : '—'} color={BLUE} />
-            </div>
+            {/* Improvement story when tracked; classic stats when scouting */}
+            {otr ? (
+              <>
+                {/* OTR hero band */}
+                <div style={{
+                  background: PANEL,
+                  border: `1px solid ${BORDER}`,
+                  borderRadius: 24,
+                  padding: '36px 44px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  boxShadow: '0 12px 32px rgba(0,0,0,0.3)'
+                }}>
+                  <div>
+                    <div style={{ color: MUTED, fontSize: 20, fontWeight: 800, letterSpacing: 3, textTransform: 'uppercase' }}>
+                      OneTap Rating · last 10
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 20, marginTop: 8 }}>
+                      <span style={{
+                        fontSize: 110,
+                        fontWeight: 900,
+                        fontFamily: 'monospace',
+                        lineHeight: 1,
+                        color: otr.otr! >= 55 ? GREEN : otr.otr! >= 45 ? '#ffffff' : AMBER,
+                      }}>
+                        {otr.otr!.toFixed(1)}
+                      </span>
+                      {otrDelta != null && otrDelta !== 0 && (
+                        <span style={{
+                          fontSize: 40,
+                          fontWeight: 900,
+                          fontFamily: 'monospace',
+                          color: otrDelta > 0 ? GREEN : AMBER,
+                        }}>
+                          {otrDelta > 0 ? '▲' : '▼'} {Math.abs(otrDelta).toFixed(1)}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ color: MUTED, fontSize: 18, fontWeight: 600, marginTop: 10 }}>
+                      vs the 9 other players in every lobby · 50 = average
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    {otr.percentile && (
+                      <div style={{ marginBottom: 18 }}>
+                        <div style={{ color: BLUE, fontSize: 44, fontWeight: 900, fontFamily: 'monospace' }}>
+                          TOP {Math.max(1, 100 - otr.percentile.percentile)}%
+                        </div>
+                        <div style={{ color: MUTED, fontSize: 18, fontWeight: 700, letterSpacing: 1.5, textTransform: 'uppercase' }}>
+                          of {otr.percentile.cohort_rank_name}s
+                        </div>
+                      </div>
+                    )}
+                    {streak > 1 && (
+                      <div style={{
+                        display: 'inline-block',
+                        padding: '10px 20px',
+                        borderRadius: 14,
+                        border: `2px solid ${GREEN}55`,
+                        background: `${GREEN}14`,
+                        color: GREEN,
+                        fontSize: 22,
+                        fontWeight: 900,
+                      }}>
+                        🔥 {streak} missions in a row
+                      </div>
+                    )}
+                  </div>
+                </div>
 
-            {/* Maps Showcase (Split grid with real widescreen map background graphics) */}
+                {/* Journey line */}
+                {otr.journey && (
+                  <div style={{
+                    background: PANEL,
+                    border: `1px solid ${BORDER}`,
+                    borderRadius: 24,
+                    padding: '30px 44px',
+                    boxShadow: '0 12px 32px rgba(0,0,0,0.3)'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                      <span style={{ color: MUTED, fontSize: 20, fontWeight: 800, letterSpacing: 3, textTransform: 'uppercase' }}>
+                        Rank Journey
+                      </span>
+                      <span style={{ color: '#ffffff', fontSize: 24, fontWeight: 900 }}>
+                        {otr.journey.start_tier_name}
+                        <span style={{ color: MUTED, fontWeight: 700 }}> → </span>
+                        <span style={{ color: RED }}>{otr.journey.current_tier_name}</span>
+                        <span style={{ color: MUTED, fontWeight: 700 }}> → </span>
+                        <span style={{ color: BLUE }}>{otr.journey.goal_tier_name}</span>
+                      </span>
+                    </div>
+                    <div style={{ marginTop: 18, height: 14, borderRadius: 7, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${Math.min(100, Math.max(3, (otr.journey.subtiers_climbed / Math.max(1, otr.journey.goal_total_subtiers)) * 100))}%`,
+                        borderRadius: 7,
+                        background: `linear-gradient(to right, ${RED}, ${BLUE})`,
+                      }} />
+                    </div>
+                  </div>
+                )}
+
+                {/* Pillar bars */}
+                {otr.pillars && (
+                  <div style={{ display: 'flex', gap: 24 }}>
+                    {(Object.keys(PILLAR_LABELS) as PillarKey[]).map((k) => {
+                      const score = otr.pillars![k];
+                      const weakest = k === otr.weakest_pillar;
+                      const color = weakest ? RED : score >= 55 ? GREEN : BLUE;
+                      return (
+                        <div key={k} style={{
+                          flex: 1,
+                          background: PANEL,
+                          border: `1px solid ${weakest ? `${RED}66` : BORDER}`,
+                          borderRadius: 20,
+                          padding: '22px 20px',
+                          boxShadow: '0 8px 32px rgba(0,0,0,0.2)'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                            <span style={{ color: MUTED, fontSize: 17, fontWeight: 800, letterSpacing: 1.5, textTransform: 'uppercase' }}>
+                              {PILLAR_LABELS[k]}
+                            </span>
+                            <span style={{ color: '#ffffff', fontSize: 34, fontWeight: 900, fontFamily: 'monospace' }}>{score}</span>
+                          </div>
+                          <div style={{ marginTop: 12, height: 10, borderRadius: 5, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${score}%`, borderRadius: 5, background: color }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ display: 'flex', gap: 24 }}>
+                <Stat label="ACS" value={vm.stats.acs.toFixed(0)} color={RED} />
+                <Stat label="HS%" value={`${vm.stats.hsPct.toFixed(0)}%`} color={RED} />
+                <Stat label="K/D" value={vm.stats.kd} color={BLUE} />
+                <Stat label="Win Rate" value={vm.stats.winRate != null ? `${vm.stats.winRate.toFixed(0)}%` : '—'} color={BLUE} />
+              </div>
+            )}
+
+            {/* Maps Showcase — only in the classic (scouting) layout; the
+                improvement layout uses that space for journey + pillars */}
+            {!otr && (
             <div style={{ display: 'flex', gap: 24 }}>
               {/* Best Map */}
               <div style={{
@@ -337,6 +525,7 @@ export default function ShareCard({ vm }: { vm: DashboardVM }) {
                 </div>
               </div>
             </div>
+            )}
 
             {/* AI Summary Block */}
             <div style={{ 

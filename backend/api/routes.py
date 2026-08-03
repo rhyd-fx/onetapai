@@ -247,7 +247,26 @@ is created without this code.
         print(f"[EMAIL VERIFICATION] To: {email} | Code: {code}")
         print(f"==================================================\n")
         return
-        
+
+    _send_email(email, subject, text_body, body)
+
+
+def _send_email(email: str, subject: str, text_body: str, html_body: str) -> bool:
+    """Send one HTML+text email via the configured SMTP relay.
+
+    Returns False (and logs) when SMTP is unconfigured or the send fails —
+    callers treat email as best-effort, never fatal.
+    """
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = os.getenv("SMTP_PORT")
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_from = os.getenv("SMTP_FROM", smtp_user)
+
+    if not (smtp_host and smtp_port and smtp_user and smtp_password):
+        print(f"[EMAIL skipped — SMTP unconfigured] To: {email} | Subject: {subject}")
+        return False
+
     try:
         # "alternative" so clients render HTML but fall back to the text part
         # (also improves spam scoring vs HTML-only mail).
@@ -256,21 +275,23 @@ is created without this code.
         msg["To"] = email
         msg["Subject"] = subject
         msg.attach(MIMEText(text_body, "plain"))
-        msg.attach(MIMEText(body, "html"))
-        
+        msg.attach(MIMEText(html_body, "html"))
+
         port = int(smtp_port)
         if port == 465:
             server = smtplib.SMTP_SSL(smtp_host, port, timeout=5)
         else:
             server = smtplib.SMTP(smtp_host, port, timeout=5)
             server.starttls()
-            
+
         server.login(smtp_user, smtp_password)
         server.sendmail(smtp_from, email, msg.as_string())
         server.quit()
-        print(f"Verification email successfully sent to {email}")
+        print(f"Email '{subject}' sent to {email}")
+        return True
     except Exception as e:
-        print(f"Error sending verification email to {email}: {e}")
+        print(f"Error sending email to {email}: {e}")
+        return False
 
 DISPOSABLE_DOMAINS = set([
     "10minutemail.com", "10minutemail.co.uk", "tempmail.com", "temp-mail.org",
@@ -493,6 +514,7 @@ def _init_auth_db():
                 "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE users ADD COLUMN is_disabled BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE users ADD COLUMN last_seen_at TIMESTAMP NULL DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN recap_emails BOOLEAN NOT NULL DEFAULT TRUE",
             ):
                 try:
                     cur.execute(ddl)
@@ -1666,4 +1688,131 @@ Rank change: {f"{transition['from_tier_name']} -> {transition['to_tier_name']}, 
 
     set_cache_value(cache_key, text, ttl=86400)
     return {"available": True, "briefing": text, "cached": False}
+
+
+# ── Weekly recap email ───────────────────────────────────────────────────
+
+def _compose_recap_email(username: str, riot_id: str, progress: dict) -> tuple[str, str, str]:
+    """(subject, text, html) for one user's weekly recap. Table layout +
+    inline styles only, matching _send_verification_email's constraints."""
+    otr = progress.get("otr")
+    recap = progress.get("recap") or {}
+    journey = progress.get("journey") or {}
+    mission = progress.get("mission") or {}
+    stats = progress.get("mission_stats") or {}
+
+    delta = recap.get("otr_delta")
+    delta_str = f"{'+' if (delta or 0) > 0 else ''}{delta}" if delta is not None else "—"
+    gain = recap.get("best_pillar_gain")
+    subject = f"Your week on OneTap: OTR {otr} ({delta_str})"
+
+    lines = [
+        f"OTR (last 10 matches): {otr} ({delta_str} vs previous 10)",
+        f"Record: {recap.get('record', '—')}",
+    ]
+    if gain:
+        lines.append(f"Biggest gain: {gain['pillar']} +{gain['delta']}")
+    if recap.get("rank_change"):
+        lines.append(f"Rank: {recap['rank_change']}")
+    if journey:
+        lines.append(
+            f"Journey: {journey.get('start_tier_name')} → {journey.get('current_tier_name')} "
+            f"({journey.get('subtiers_to_goal')} steps to {journey.get('goal_tier_name')})"
+        )
+    if mission:
+        lines.append(f"Active mission: {mission.get('goal')} ({mission.get('matches_played', 0)}/{mission.get('target_matches', 5)})")
+    if stats.get("streak", 0) > 1:
+        lines.append(f"Mission streak: {stats['streak']} in a row")
+
+    text = f"""ONETAP AI — WEEKLY RECAP for {riot_id}
+
+""" + "\n".join(f"- {l}" for l in lines) + """
+
+Open your dashboard for tonight's mission and briefing:
+https://onetapai.app/dashboard
+
+(c) 2026 OneTap AI — Valorant Coaching Platform
+"""
+    rows = "".join(
+        f'<tr><td style="padding:8px 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#ffffff;border-bottom:1px solid #1e2a38;">{l}</td></tr>'
+        for l in lines
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="en"><body style="margin:0;padding:0;background-color:#05070b;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#05070b;"><tr><td align="center" style="padding:40px 12px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;">
+<tr><td align="center" style="padding:0 24px 22px;"><span style="font-family:Arial,Helvetica,sans-serif;font-size:22px;font-weight:900;letter-spacing:4px;text-transform:uppercase;color:#ffffff;">ONETAP<span style="color:#ff4655;">AI</span></span></td></tr>
+<tr><td><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#0f1720;border:1px solid #1e2a38;border-radius:16px;">
+<tr><td style="height:3px;line-height:3px;font-size:0;background-color:#ff4655;border-radius:16px 16px 0 0;">&nbsp;</td></tr>
+<tr><td style="padding:32px 40px 8px;"><span style="font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:bold;letter-spacing:5px;text-transform:uppercase;color:#8b9bb0;">Weekly Recap · {riot_id}</span></td></tr>
+<tr><td style="padding:4px 40px 0;"><span style="font-family:Arial,Helvetica,sans-serif;font-size:44px;font-weight:900;color:{'#34d399' if (delta or 0) > 0 else '#ffffff'};">{otr}</span>
+<span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;color:#8b9bb0;"> OTR ({delta_str})</span></td></tr>
+<tr><td style="padding:20px 40px 32px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{rows}</table></td></tr>
+<tr><td align="center" style="padding:0 40px 36px;"><a href="https://onetapai.app/dashboard" style="display:inline-block;background-color:#ff4655;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:900;letter-spacing:2px;text-transform:uppercase;text-decoration:none;padding:14px 34px;border-radius:10px;">Tonight's Mission →</a></td></tr>
+</table></td></tr>
+<tr><td align="center" style="padding:22px 24px 0;"><span style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#8b9bb0;">© 2026 OneTap AI — you get this weekly while recap emails are on.</span></td></tr>
+</table></td></tr></table></body></html>"""
+    return subject, text, html
+
+
+def _build_progress_payload(conn, puuid: str) -> dict | None:
+    """The same shape /progress returns, for internal consumers (recap email)."""
+    profile = get_otr_profile(conn, puuid)
+    if not profile:
+        return None
+    transition = detect_rank_transition(conn, puuid)
+    mission_state = get_mission_state(conn, puuid, profile)
+    return {
+        **profile,
+        "mission": (mission_state or {}).get("active"),
+        "mission_stats": (mission_state or {}).get("stats"),
+        "recap": build_weekly_recap(profile, transition),
+        "journey": get_rank_journey(conn, puuid),
+    }
+
+
+@app.post("/api/v1/admin/send-weekly-recaps")
+@limiter.limit("4/hour")
+async def send_weekly_recaps(request: Request, admin: dict = Depends(require_admin)):
+    """Send the weekly recap email to every opted-in user with a linked Riot
+    ID. Trigger from cron on the server (or manually from the admin panel):
+        curl -X POST .../api/v1/admin/send-weekly-recaps -H "Authorization: Bearer <admin JWT>"
+    Idempotent per week per user via a cache guard."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, username, email, linked_riot_id FROM users "
+                "WHERE is_disabled = 0 AND recap_emails = 1 "
+                "AND linked_riot_id IS NOT NULL AND linked_riot_id LIKE '%#%'"
+            )
+            users = cur.fetchall()
+
+        week = time.strftime("%G-W%V")  # ISO week, e.g. 2026-W32
+        sent = skipped = failed = 0
+        for u in users:
+            guard = f"recap_sent:{u['id']}:{week}"
+            if get_cache_value(guard):
+                skipped += 1
+                continue
+            name, tag = (p.strip() for p in u["linked_riot_id"].rsplit("#", 1))
+            puuid = resolve_puuid(conn, name, tag)
+            if not puuid:
+                skipped += 1
+                continue
+            progress = _build_progress_payload(conn, puuid)
+            if not progress or progress.get("otr") is None:
+                skipped += 1
+                continue
+            subject, text, html = _compose_recap_email(u["username"], u["linked_riot_id"], progress)
+            ok = await asyncio.to_thread(_send_email, u["email"], subject, text, html)
+            if ok:
+                sent += 1
+                set_cache_value(guard, "1", ttl=6 * 86400)  # block re-sends this week
+            else:
+                failed += 1
+    finally:
+        conn.close()
+
+    return {"eligible": len(users), "sent": sent, "skipped": skipped, "failed": failed}
 

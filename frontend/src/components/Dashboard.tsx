@@ -396,7 +396,7 @@ export default function Dashboard() {
             <Panel glow="blue" className="flex flex-col p-5">
               <SectionTitle accent="blue">Share Your Card</SectionTitle>
               {vm ? (
-                <div className="flex-1 flex flex-col justify-center"><ShareCard vm={vm} /></div>
+                <div className="flex-1 flex flex-col justify-center"><ShareCard vm={vm} progress={progress} /></div>
               ) : (
                 <p className="text-xs text-muted animate-pulse">Syncing your latest matches…</p>
               )}
@@ -719,7 +719,7 @@ export default function Dashboard() {
                   AI summary. Perfect for flexing your grind.
                 </p>
                 <div className="flex-1 flex flex-col justify-center">
-                  <ShareCard vm={vm} />
+                  <ShareCard vm={vm} progress={viewingSelf ? progress : null} />
                 </div>
               </Panel>
             </section>
