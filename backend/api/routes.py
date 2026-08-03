@@ -1022,6 +1022,55 @@ async def admin_overview(request: Request, admin: dict = Depends(require_admin))
                 "coach_feedback_positive": int(fb["thumbs_up"] or 0),
                 "coach_feedback_7d": int(fb["last_7d"] or 0),
             }
+
+            # ── Engagement: the evidence base for rank-up claims ──────
+            # Every block is best-effort — tables appear lazily (missions on
+            # first progress view, check-ins on first self view), so a fresh
+            # deploy must not 500 the whole overview.
+            engagement: dict = {}
+            try:
+                cur.execute(
+                    """
+                    SELECT status, COUNT(*) n, AVG(CAST(final_score AS SIGNED) - CAST(baseline_score AS SIGNED)) avg_lift
+                    FROM player_missions WHERE status != 'active' GROUP BY status
+                    """
+                )
+                rows = {r["status"]: r for r in cur.fetchall()}
+                done = int((rows.get("completed") or {}).get("n") or 0)
+                failed = int((rows.get("failed") or {}).get("n") or 0)
+                engagement["missions"] = {
+                    "resolved": done + failed,
+                    "completed": done,
+                    "completion_rate": round(done / (done + failed) * 100, 1) if (done + failed) else None,
+                    # Pillar-point lift even on FAILED missions — improvement
+                    # short of target is still improvement, and it's the
+                    # honest number behind any marketing claim.
+                    "avg_pillar_lift_completed": round(float((rows.get("completed") or {}).get("avg_lift") or 0), 1) if done else None,
+                    "avg_pillar_lift_failed": round(float((rows.get("failed") or {}).get("avg_lift") or 0), 1) if failed else None,
+                }
+            except Exception:
+                engagement["missions"] = None
+            try:
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT user_id) users_ever,
+                           COUNT(DISTINCT CASE WHEN day >= CURDATE() - INTERVAL 7 DAY THEN user_id END) users_7d,
+                           SUM(day >= CURDATE() - INTERVAL 7 DAY) checkins_7d
+                    FROM user_checkins
+                    """
+                )
+                ck = cur.fetchone() or {}
+                users_7d = int(ck.get("users_7d") or 0)
+                engagement["checkins"] = {
+                    "users_ever": int(ck.get("users_ever") or 0),
+                    "users_7d": users_7d,
+                    # Days checked in per active user this week — the daily-
+                    # habit number this whole redesign exists to move.
+                    "avg_days_per_user_7d": round(int(ck.get("checkins_7d") or 0) / users_7d, 1) if users_7d else None,
+                }
+            except Exception:
+                engagement["checkins"] = None
+            out["engagement"] = engagement
             return out
     finally:
         conn.close()
@@ -1773,11 +1822,25 @@ def _build_progress_payload(conn, puuid: str) -> dict | None:
 
 @app.post("/api/v1/admin/send-weekly-recaps")
 @limiter.limit("4/hour")
-async def send_weekly_recaps(request: Request, admin: dict = Depends(require_admin)):
+async def send_weekly_recaps(
+    request: Request,
+    authorization: str | None = Header(None),
+    x_cron_secret: str | None = Header(None),
+):
     """Send the weekly recap email to every opted-in user with a linked Riot
-    ID. Trigger from cron on the server (or manually from the admin panel):
-        curl -X POST .../api/v1/admin/send-weekly-recaps -H "Authorization: Bearer <admin JWT>"
+    ID. Two auth paths:
+      - admin JWT (manual trigger from the admin panel), or
+      - X-Cron-Secret header matching RECAP_CRON_SECRET (for server cron —
+        JWTs expire hourly, a static secret doesn't):
+        curl -X POST .../api/v1/admin/send-weekly-recaps -H "X-Cron-Secret: $RECAP_CRON_SECRET"
     Idempotent per week per user via a cache guard."""
+    cron_secret = os.getenv("RECAP_CRON_SECRET")
+    if cron_secret and x_cron_secret and hmac.compare_digest(x_cron_secret, cron_secret):
+        pass  # authenticated as cron
+    else:
+        user = get_current_user(authorization)
+        if not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required.")
     conn = _connect()
     try:
         with conn.cursor() as cur:
