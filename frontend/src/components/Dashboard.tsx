@@ -188,6 +188,8 @@ export default function Dashboard() {
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
   const [progressLoading, setProgressLoading] = useState(false);
   const [showDeepStats, setShowDeepStats] = useState(false);
+  // Read-only OTR/journey for a SCOUTED player (no missions/check-ins).
+  const [scoutProgress, setScoutProgress] = useState<ProgressResponse | null>(null);
 
   const linkedId = user?.linked_riot_id && user.linked_riot_id.includes('#') ? user.linked_riot_id : null;
   // Viewing yourself (progress hero) vs scouting someone else (classic view).
@@ -254,10 +256,16 @@ export default function Dashboard() {
     setSelectedSeason(null);
     setModeId('ranked');
     setShowAllMatches(false);
+    setScoutProgress(null);
     try {
-      setResult(await analyzePlayer(riotId.trim(), region));
+      const searched = riotId.trim();
+      setResult(await analyzePlayer(searched, region));
       refreshSession();
       fetchRecentSearches().then(setRecentSearches).catch(console.error);
+      // Scouting someone else: load their OTR/journey read-only (no missions).
+      if (searched !== linkedId) {
+        fetchProgress(searched, 30, true).then(setScoutProgress).catch(() => {});
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Request failed');
       setResult(null);
@@ -293,10 +301,14 @@ export default function Dashboard() {
     setSelectedSeason(null);
     setModeId('ranked');
     setShowAllMatches(false);
+    setScoutProgress(null);
     try {
       setResult(await analyzePlayer(id.trim(), playRegion));
       refreshSession();
       fetchRecentSearches().then(setRecentSearches).catch(console.error);
+      if (id.trim() !== linkedId) {
+        fetchProgress(id.trim(), 30, true).then(setScoutProgress).catch(() => {});
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Request failed');
       setResult(null);
@@ -434,6 +446,11 @@ export default function Dashboard() {
         )
       ) : viewingSelf && !showDeepStats ? null : (
         <div className="space-y-8 animate-fade-in">
+          {/* Scouted player's OTR + journey (read-only — no missions/streaks) */}
+          {!viewingSelf && scoutProgress?.available && (
+            <ProgressHome progress={scoutProgress} riotId={vm.riotId} scout />
+          )}
+
           {/* Diagnostic filters */}
           <div className="flex flex-col gap-4 rounded-2xl border border-line bg-ink-950/40 p-4 backdrop-blur-md sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">

@@ -424,9 +424,9 @@ export interface ProgressResponse {
   } | null;
 }
 
-export async function fetchProgress(riotId: string, lastN = 30): Promise<ProgressResponse> {
+export async function fetchProgress(riotId: string, lastN = 30, scout = false): Promise<ProgressResponse> {
   const res = await fetch(
-    `${API_BASE}/api/v1/player/${encodeURIComponent(riotId)}/progress?last_n=${lastN}`,
+    `${API_BASE}/api/v1/player/${encodeURIComponent(riotId)}/progress?last_n=${lastN}${scout ? '&scout=true' : ''}`,
     { headers: getHeaders() }
   );
   if (!res.ok) {

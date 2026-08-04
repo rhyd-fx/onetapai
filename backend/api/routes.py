@@ -1626,10 +1626,15 @@ async def get_economy_impact(riot_id: str, last_n: int = 20, user: dict = Depend
 
 
 @app.get("/api/v1/player/{riot_id}/progress")
-async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_current_user)):
+async def get_progress(riot_id: str, last_n: int = 30, scout: bool = False, user: dict = Depends(get_current_user)):
     """The daily progress tracker: OneTap Rating (lobby-relative, so already
     rank- and smurf-adjusted), pillar breakdown, rank-cohort percentile, the
-    graded mission loop, check-in streak, and the rank journey."""
+    graded mission loop, check-in streak, and the rank journey.
+
+    scout=true is the read-only view of ANOTHER player: ratings and journey
+    only — no check-in, and critically no mission assignment (missions are a
+    coaching contract with the viewed player, not a side effect of being
+    looked at)."""
     name, tag = _split_riot_id(riot_id)
     conn = _connect()
     try:
@@ -1640,14 +1645,15 @@ async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_
         # A check-in is "I looked at MY OWN progress today" — scouting someone
         # else doesn't count. Never let streak bookkeeping break the page.
         checkin = None
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT linked_riot_id FROM users WHERE id = %s", (user.get("user_id"),))
-                row = cur.fetchone()
-            if row and row.get("linked_riot_id") == riot_id:
-                checkin = record_checkin(conn, int(user["user_id"]))
-        except Exception as e:  # noqa: BLE001
-            print(f"check-in failed for user {user.get('user_id')}: {e}")
+        if not scout:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT linked_riot_id FROM users WHERE id = %s", (user.get("user_id"),))
+                    row = cur.fetchone()
+                if row and row.get("linked_riot_id") == riot_id:
+                    checkin = record_checkin(conn, int(user["user_id"]))
+            except Exception as e:  # noqa: BLE001
+                print(f"check-in failed for user {user.get('user_id')}: {e}")
 
         profile = get_otr_profile(conn, puuid, match_limit=last_n)
         if not profile:
@@ -1658,7 +1664,7 @@ async def get_progress(riot_id: str, last_n: int = 30, user: dict = Depends(get_
             }
         transition = detect_rank_transition(conn, puuid)
         percentile = get_otr_percentile(conn, puuid, profile["otr"])
-        mission_state = get_mission_state(conn, puuid, profile)
+        mission_state = None if scout else get_mission_state(conn, puuid, profile)
         journey = get_rank_journey(conn, puuid)
     finally:
         conn.close()

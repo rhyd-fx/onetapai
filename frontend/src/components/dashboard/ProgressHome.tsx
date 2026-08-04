@@ -43,16 +43,19 @@ const OtrTooltip = ({ active, payload }: any) => {
   );
 };
 
-export default function ProgressHome({ progress, riotId }: { progress: ProgressResponse; riotId: string }) {
+export default function ProgressHome({ progress, riotId, scout = false }: { progress: ProgressResponse; riotId: string; scout?: boolean }) {
   const [briefing, setBriefing] = useState<string | null>(null);
 
   useEffect(() => {
+    // The briefing is a personal coaching artifact (and generating it builds
+    // mission state server-side) — never fetch it for a scouted player.
+    if (scout) return;
     let cancelled = false;
     fetchBriefing(riotId)
       .then((b) => { if (!cancelled && b.available && b.briefing) setBriefing(b.briefing); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [riotId]);
+  }, [riotId, scout]);
 
   if (!progress.available || progress.otr == null) {
     return (
@@ -162,7 +165,7 @@ export default function ProgressHome({ progress, riotId }: { progress: ProgressR
       )}
       {/* ── HERO: the number they come back for ── */}
       <section className="grid gap-4 lg:grid-cols-3">
-        <Panel glow="red" className="lg:col-span-2 p-6">
+        <Panel glow="red" className={`p-6 ${scout ? 'lg:col-span-3' : 'lg:col-span-2'}`}>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <div className="text-[10px] font-black uppercase tracking-widest text-muted mb-1">
@@ -219,7 +222,8 @@ export default function ProgressHome({ progress, riotId }: { progress: ProgressR
           </div>
         </Panel>
 
-        {/* ── MISSION: assigned, tracked, GRADED ── */}
+        {/* ── MISSION: assigned, tracked, GRADED (never for scouted players) ── */}
+        {!scout && (
         <Panel glow="blue" className="p-6 flex flex-col">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
@@ -273,6 +277,7 @@ export default function ProgressHome({ progress, riotId }: { progress: ProgressR
             <p className="text-xs text-muted">Play more matches to unlock your first mission.</p>
           )}
         </Panel>
+        )}
       </section>
 
       {/* ── PILLARS: where the rating comes from ── */}
